@@ -12,6 +12,13 @@ import { readFileSync, existsSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { TRANCHE, jobBranch, stateBranch, refuse, repo, ghRepo, readRole, unpushed, commitPush, pruneRef, needEpoch, stateRead, stateWrite, parsePlan, planEdit, jobFiles, METRICS_HEAD, metricsFile } from './record.mjs';
 import { constraints } from './platform.mjs';
+// architecture (K25): the module map, the manifest's artifact rows, and the checks' one machine-readable result.
+import { modules as moduleMap } from '../checks/architecture.mjs';
+import { artifactRows } from '../checks/lib.mjs';
+import { readResult } from '../checks/run.mjs';
+// requirements (K25): the rule every review brief carries (requirements R4; REQ-3).
+import { MEASUREMENT_RULE } from './requirements.mjs';
+export { MEASUREMENT_RULE };
 
 const now = () => new Date().toISOString();
 const today = () => now().slice(0, 10);
@@ -49,6 +56,18 @@ const saveJob = (R, m, j, msg) => stateWrite(R, { [jobPath(m)]: fmtJob(m, j) }, 
 // A job whose work is on the tranche: merged, or retired after its merge (R5).
 export const DONE = Object.freeze(['MERGED', 'RETIRED', 'ARCHIVED']);
 const done = (R, m) => DONE.includes(jobOf(R, m)?.state);
+const modules = (R) => moduleMap(R).modules;
+const mod = (R, m) => modules(R).find((x) => x.id === m) ?? refuse(`no module ${m} in build/modules.json`);
+const artifacts = (R) => artifactRows(R.read('build/manifest.md') || '').map((r) => ({ ...r, path: r.paths.join(', ') }));
+// The checks whole over the product (architecture R2), run as their command so this stays one synchronous step, and read
+// back from their one result file (architecture R3), never from the log; a finding is compared without its line numbers.
+const CHECKS = join(new URL('..', import.meta.url).pathname, 'checks/run.mjs');
+function allChecks(R) {
+  const r = spawnSync('node', [CHECKS, R.dir, '--no-fetch'], { encoding: 'utf8', maxBuffer: 1 << 28 });
+  const res = readResult(R);
+  if (!res) return { fails: new Set([`check: no result written (${`${r.stdout}${r.stderr}`.trim().split('\n').pop()})`]) };
+  return { fails: new Set(res.findings.map((f) => `${f.check}: ${String(f.finding).replace(/:\d+(?::\d+)?\b/g, '').trim()}`)) };
+}
 // planning: the running plan and its tranche id (planning R1).
 const PLAN = 'build/plan/current.md';
 function tranche(R) {
@@ -62,29 +81,6 @@ function entriesOf(planText, layer, m) {
   const block = sec.split(/^\*\*/m).find((b) => b.startsWith(`${m}**`));
   return block ? block.slice(m.length + 2).trim() : '';
 }
-// architecture (Q4, asked): the module map and the checks over the whole product.
-function modules(R) { const all = JSON.parse(R.read('build/modules.json') || '[]'); return Array.isArray(all) ? all : all.modules || []; }
-const mod = (R, m) => modules(R).find((x) => x.id === m) ?? refuse(`no module ${m} in build/modules.json`);
-function artifacts(R) {
-  const rows = [];
-  for (const l of (R.read('build/manifest.md') || '').split('\n')) {
-    const c = l.split('|').map((x) => x.trim());
-    if (c.length < 6 || !/^`[^`]+`/.test(c[1]) || !/^`.+`$/.test(c[3]) || !/^`.+`$/.test(c[4])) continue;
-    const paths = [...c[1].matchAll(/`([^`]+)`/g)].map((x) => x[1]);
-    rows.push({ paths, path: paths.join(', '), regen: c[3].slice(1, -1), verify: c[4].slice(1, -1) });
-  }
-  return rows;
-}
-const CHECKS = join(new URL('..', import.meta.url).pathname, 'checks/run.mjs');
-const norm = (l) => `check: ${l.replace(/^FAIL\s+/, '').replace(/:\d+(?::\d+)?\b/g, '').trim()}`;
-function allChecks(R) {
-  const r = spawnSync('node', [CHECKS, R.dir], { encoding: 'utf8', maxBuffer: 1 << 28 });
-  const fails = new Set(`${r.stdout}`.split('\n').filter((l) => l.startsWith('FAIL')).map(norm));
-  if (r.status && !fails.size) fails.add(`check: ${`${r.stdout}${r.stderr}`.trim().split('\n').pop()}`);
-  return { fails };
-}
-// requirements (Q4, asked): the rule every review brief carries (requirements R4; REQ-3).
-export const MEASUREMENT_RULE = 'A figure at a scale beyond the suite, or on a deployed copy, is a measurement with its own id in the plan, never a Test line; a measurement not yet taken is not a gap.';
 // jobs: the report's evidence items (rulebook BLD 8).
 function evidenceItems(report) {
   const lines = String(report || '').split('\n'), i = lines.findIndex((l) => /^\*\*Evidence\*\*/.test(l));

@@ -180,6 +180,10 @@ test('R3 the layer\'s close: every pull request merged, the layer\'s tests once 
   // the fix is merged: the layer closes; the stale rows of platform's table listed; each job retired on the record
   writeFileSync(join(w.bob.dir, 'alpha/test/layer/l1.test.mjs'), "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { sum } from '../../src/index.mjs';\ntest('alpha and beta agree on a total', () => { assert.equal(sum([1, 2]), 3); });\n");
   commitPush(w.R, TRANCHE, ['alpha/test/layer/l1.test.mjs'], 'layer 1 tests fixed');
+  // a check finding the tranche did not have when it opened (a file no module owns) refuses the close; removed, it closes
+  writeFileSync(join(w.bob.dir, 'stray.mjs'), 'export const x = 1;\n'); commitPush(w.R, TRANCHE, ['stray.mjs'], 'a stray file');
+  assert.throws(() => I.layerClose(o({ layer: 1 })), /checks: 1 finding\(s\) new since the tranche opened: architecture: stray\.mjs: owned by no module/);
+  w.g2('rm', '-q', 'toy/stray.mjs'); w.g2('commit', '-q', '-m', 'the stray file removed'); w.g2('push', '-q', 'origin', 'HEAD:tranche');
   const lc = out(I.layerClose(o({ layer: 1, olderThan: '2999-01-01' })));
   assert.equal(lc.layer, 1); assert.deepEqual([lc.tests.tests, lc.tests.pass, lc.tests.failed], [1, 1, []]);
   assert.equal(lc.stale.length, constraints().length); assert.ok(lc.stale.every((r) => r.id && r.date));
