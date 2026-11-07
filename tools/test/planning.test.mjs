@@ -3,10 +3,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import * as P from '../planning.mjs';
+import { GRANTS_FILE } from '../platform.mjs';
 import { repo, TRANCHE, epochOpen, stateWrite, stateRead, fmtPlan, parsePlan, planEdit, recordLocal, ROLE_FILE, status, pinOf, metricsRow, commitPush } from '../record.mjs';
 
 const B1 = 'session_01BBBBBBBBBBBBBBBBBBBBBBBB', J1 = 'session_01JJJJJJJJJJJJJJJJJJJJJJJJ';
@@ -21,16 +22,19 @@ function product(base, name, mods, next) {
   const origin = join(base, `${name}.git`), seed = join(base, `${name}-seed`);
   execFileSync('git', ['init', '-q', '--bare', origin]);
   execFileSync('git', ['clone', '-q', origin, seed], { stdio: 'ignore' }); ident(seed, 'seed');
-  put(seed, 'build/modules.json', JSON.stringify({ modules: mods.map(([id, layer]) => ({ id, layer, paths: [`src/${id}.mjs`], tests: [], uses: [] })) }, null, 2));
+  put(seed, 'build/modules.json', JSON.stringify({ not_product: ['build/', 'docs/'], modules: mods.map(([id, layer]) => ({ id, layer, paths: [`src/${id}.mjs`], tests: [], uses: [] })) }, null, 2));
   for (const [id, , cites] of mods) { put(seed, `build/requirements/${id}.md`, reqFile(id, cites)); put(seed, `src/${id}.mjs`, `export const ${id} = 1;\n`); }
   put(seed, 'build/plan/next.md', next);
   g(seed, 'add', '.'); g(seed, 'commit', '-q', '-m', 'seed'); g(seed, 'branch', '-M', 'main'); g(seed, 'push', '-q', 'origin', 'main');
   const dir = join(base, `${name}-bob`);
   execFileSync('git', ['clone', '-q', '-b', 'main', origin, dir], { stdio: 'ignore' }); ident(dir, 'bob');
+  grants(dir);
   return { origin, seed, dir, R: repo(dir), o: (x = {}) => ({ product: dir, ...x }), g: (...a) => g(dir, ...a) };
 }
-const OK = { grants: () => null, words: () => [] };
-const CLOSE = { asks: () => [], regenerate: () => ({ changed: [], stale: [] }), checks: () => ({ fails: new Set() }) };
+// the grants as `proc grants check` records them on the checkout (platform's record, read by its grantsHeld)
+const grants = (dir, { ok = true, at = new Date() } = {}) => writeFileSync(join(dir, '.git', GRANTS_FILE), JSON.stringify({ at: at.toISOString(), ok, rows: ok ? [] : [{ grant: 'the workflow token', ok: false, detail: 'expired' }] }));
+// what the close is given by the dispatcher from modules after planning (K29): no ask open, no artifact to regenerate
+const CLOSE = { asks: () => [], regenerate: () => ({ changed: [], stale: [] }) };
 // BOB's record, as takeover leaves it: the role on the checkout and the plan's Status line (record's own format)
 function asBob(p, layers = {}) {
   recordLocal(p.dir, ROLE_FILE, { role: 'bob', product: '.', session: B1, name: 'BOB #1' });
@@ -45,48 +49,58 @@ function mergeJob(p, m, n, file = `src/${m}.mjs`) {
 const TWO = [['alpha', 1, ['XYZ-1']], ['beta', 2, ['XYZ-2']]];
 const TWO_PLAN = planText('T1', [[1, [['alpha', 'T1-1', 'XYZ-1']]], [2, [['beta', 'T1-2', 'XYZ-2']]]]);
 
-test('R1 trancheOpen opens on tranche fast-forwarded to main, the plan copied whole from next.md with its census first and its pin; refused while a plan on main reads CLOSING, the words check has a finding, or the grant check is missing, failed or stale', () => {
+test('R1 trancheOpen opens on tranche fast-forwarded to main, the plan copied whole from next.md with its census first and its pin; refused while a plan on main reads CLOSING, the words check has a finding, or the grant check is missing, failed or stale', async () => {
   const base = mkdtempSync(join(tmpdir(), 'planning-'));
   const p = product(base, 'a', TWO, TWO_PLAN);
-  assert.throws(() => P.trancheOpen(p.o()), /grant check is not given/);
-  assert.throws(() => P.trancheOpen(p.o(), { grants: () => null }), /words check is not given/);
-  assert.throws(() => P.trancheOpen(p.o(), { ...OK, grants: () => 'the grants were proven at 2026-10-01, over 24 hours ago' }), /over 24 hours ago/);
-  assert.throws(() => P.trancheOpen(p.o(), { ...OK, words: () => ['FAIL words: an inline sentence'] }), /words check reports 1 finding/);
+  // the grant check (platform's grantsHeld): missing, failed, older than a day
+  rmSync(join(p.dir, '.git', GRANTS_FILE));
+  await assert.rejects(P.trancheOpen(p.o()), /the grants are not proven held/);
+  grants(p.dir, { ok: false });
+  await assert.rejects(P.trancheOpen(p.o()), /a grant is not held: the workflow token: expired/);
+  grants(p.dir, { at: new Date(Date.now() - 25 * 36e5) });
+  await assert.rejects(P.trancheOpen(p.o()), /over 24 hours ago/);
+  grants(p.dir);
+  // the words check (architecture's), where the product configures it: a member-facing sentence in a module's source
+  put(p.seed, 'build/words.json', '{}\n'); put(p.seed, 'src/alpha.mjs', "export const alpha = () => 'Your order has been sent to the kitchen.';\n");
+  g(p.seed, 'add', '-A'); g(p.seed, 'commit', '-q', '-m', 'words'); g(p.seed, 'push', '-q', 'origin', 'main'); p.g('pull', '-q');
+  await assert.rejects(P.trancheOpen(p.o()), /the words check reports 1 finding\(s\): inline alpha src\/alpha\.mjs:1/);
+  put(p.seed, 'src/alpha.mjs', 'export const alpha = 1;\n'); g(p.seed, 'commit', '-q', '-am', 'no sentence'); g(p.seed, 'push', '-q', 'origin', 'main'); p.g('pull', '-q');
   // the plan's own shape, on main: its pin, its census before its first layer, its entries in module groups
   const onMain = (text) => { put(p.seed, 'build/plan/next.md', text); g(p.seed, 'add', '-A'); g(p.seed, 'commit', '-q', '-m', 'next'); g(p.seed, 'push', '-q', 'origin', 'main'); };
   onMain(TWO_PLAN.replace(/pinned at `abc1234`/, 'pinned'));
-  assert.throws(() => P.trancheOpen(p.o(), OK), /names the pinned process commit/);
+  await assert.rejects(P.trancheOpen(p.o()), /names the pinned process commit/);
   onMain(planText('T1', [[1, [['alpha', 'T1-1', 'XYZ-1']]]], { census: false }) + '\n**The legacy census** · late.\n');
-  assert.throws(() => P.trancheOpen(p.o(), OK), /legacy census .* comes before its first layer/);
+  await assert.rejects(P.trancheOpen(p.o()), /legacy census .* comes before its first layer/);
   onMain(TWO_PLAN.replace('**alpha**\n', ''));
-  assert.throws(() => P.trancheOpen(p.o(), OK), /entry T1-1 is under no module group/);
+  await assert.rejects(P.trancheOpen(p.o()), /entry T1-1 is under no module group/);
   onMain(TWO_PLAN.replace('XYZ-1:', 'XYZ-9:'));
-  assert.throws(() => P.trancheOpen(p.o(), OK), /T1-1: cites XYZ-9, which build\/requirements\/alpha\.md does not/);
+  await assert.rejects(P.trancheOpen(p.o()), /T1-1: cites XYZ-9, which build\/requirements\/alpha\.md does not/);
   // an archived plan on main still CLOSING
   put(p.seed, 'build/plan/archive/T0-R1.md', '# Plan: old · T0\n\n**Status** · CLOSING\n'); onMain(TWO_PLAN);
-  assert.throws(() => P.trancheOpen(p.o(), OK), /still reads CLOSING on main: build\/plan\/archive\/T0-R1\.md/);
+  await assert.rejects(P.trancheOpen(p.o()), /still reads CLOSING on main: build\/plan\/archive\/T0-R1\.md/);
   g(p.seed, 'rm', '-q', 'build/plan/archive/T0-R1.md'); g(p.seed, 'commit', '-q', '-m', 'closed'); g(p.seed, 'push', '-q', 'origin', 'main');
-  const to = P.trancheOpen(p.o(), OK);
+  const to = await P.trancheOpen(p.o());
   assert.deepEqual([to.tranche, to.round, to.layers, to.pin, p.R.branch()], ['T1', 1, [1, 2], 'abc1234', TRANCHE]);
   assert.equal(readFileSync(join(p.dir, P.PLAN), 'utf8'), `${TWO_PLAN.trimEnd()}\n`);   // whole
   assert.equal(existsSync(join(p.dir, P.NEXT)), false);
   assert.equal(p.g('rev-parse', `origin/${TRANCHE}~1`), p.g('rev-parse', 'origin/main'));   // main's tip, plus the plan's move
   assert.equal(p.g('rev-parse', `origin/${TRANCHE}`), p.g('rev-parse', 'HEAD'));
-  assert.throws(() => P.trancheOpen(p.o(), OK), /holds work not on main/);
+  await assert.rejects(P.trancheOpen(p.o()), /holds work not on main/);
 });
 
-test('R2 trancheClose only when every round is archived and every job merged: main merged in (never a rebase), the archive with each entry\'s outcome and the usage, CLOSING, the one close PR; trancheMerged records it', () => {
+test('R2 trancheClose only when every round is archived and every job merged: main merged in (never a rebase), the archive with each entry\'s outcome and the usage, CLOSING, the one close PR; trancheMerged records it', async () => {
   const base = mkdtempSync(join(tmpdir(), 'planning-'));
   const p = product(base, 'a', TWO, TWO_PLAN);
-  P.trancheOpen(p.o(), OK); epochOpen(p.o()); asBob(p);
-  assert.throws(() => P.trancheClose(p.o()), /the asks check is not given/);
-  assert.throws(() => P.trancheClose(p.o(), CLOSE), /a round is open/);
+  await P.trancheOpen(p.o()); epochOpen(p.o()); asBob(p);
+  await assert.rejects(P.trancheClose(p.o()), /the open asks \(deps\.asks\) not given/);
+  await assert.rejects(P.trancheClose(p.o(), { asks: CLOSE.asks }), /the artifacts' regeneration \(deps\.regenerate\) not given/);
+  await assert.rejects(P.trancheClose(p.o(), CLOSE), /a round is open/);
   mergeJob(p, 'alpha', 3);
   jobLine(p, 'alpha', 'ARCHIVED', 3);
   planEdit(p.R, (q) => ({ ...q, layers: { 1: 'CLOSED', 2: 'CLOSED' } }), 'layers run');
   P.roundClose(p.o());
-  assert.throws(() => P.trancheClose(p.o(), { ...CLOSE, asks: () => ['A1'] }), /asks still open: A1/);
-  assert.throws(() => P.trancheClose(p.o(), CLOSE), /entries whose module's job is not merged: beta \(T1-2\)/);
+  await assert.rejects(P.trancheClose(p.o(), { ...CLOSE, asks: () => ['A1'] }), /asks still open: A1/);
+  await assert.rejects(P.trancheClose(p.o(), CLOSE), /entries whose module's job is not merged: beta \(T1-2\)/);
   mergeJob(p, 'beta', 4);
   jobLine(p, 'beta', 'ARCHIVED', 4);
   metricsRow(p.R, [J1, 'job', 'ALPHA #1', 'alpha', 100, 20, 3, 7, 1, 2, '', ''], { tranche: 'T1' });
@@ -94,9 +108,13 @@ test('R2 trancheClose only when every round is archived and every job merged: ma
   commitPush(p.R, TRANCHE, ['build/metrics/T1.csv'], 'metrics');
   // main moved meanwhile (Bob's design stream): merged in at the close, never a rebase
   put(p.seed, 'docs/ux.md', 'a design\n'); g(p.seed, 'add', '.'); g(p.seed, 'commit', '-q', '-m', 'ux'); g(p.seed, 'push', '-q', 'origin', 'main');
-  assert.throws(() => P.trancheClose(p.o(), { ...CLOSE, checks: (R) => ({ fails: new Set(R.read('src/beta.mjs').includes('4') ? ['check: beta'] : []) }) }), /checks: 1 finding\(s\) new since the tranche opened: check: beta/);   // a finding the base had is not new
+  // a finding of the whole-product checks (architecture's run) that the tranche's base did not have refuses the close
+  const map = readFileSync(join(p.dir, 'build/modules.json'), 'utf8');
+  put(p.dir, 'build/modules.json', map.replace('"src/alpha.mjs"', '"src/alpha.mjs", "src/gone.mjs"')); commitPush(p.R, TRANCHE, ['build/modules.json'], 'a path naming no file');
+  await assert.rejects(P.trancheClose(p.o(), CLOSE), /checks: \d+ finding\(s\) new since the tranche opened: .*src\/gone\.mjs/);
   p.g('reset', '-q', '--hard', `origin/${TRANCHE}`);
-  const tc = P.trancheClose(p.o(), CLOSE);
+  put(p.dir, 'build/modules.json', map); commitPush(p.R, TRANCHE, ['build/modules.json'], 'the path fixed');
+  const tc = await P.trancheClose(p.o(), CLOSE);
   p.g('fetch', '-q', 'origin');
   assert.doesNotThrow(() => p.g('merge-base', '--is-ancestor', 'origin/main', `origin/${TRANCHE}`));
   assert.ok(p.g('log', '--format=%s', `origin/${TRANCHE}`).includes('Merge pull request #3 from o/job/alpha'));   // its history kept
@@ -114,10 +132,10 @@ test('R2 trancheClose only when every round is archived and every job merged: ma
   assert.deepEqual([parsePlan(stateRead(p.R, 'plan.md')).state, parsePlan(stateRead(p.R, 'plan.md')).owed], ['CLOSED', []]);
 });
 
-test('R3 roundOpen copies a round\'s entries whole, grouped by module under their layers, refused while a round runs; the completion round has its own file, distinct from next.md, opened after the last layer', () => {
+test('R3 roundOpen copies a round\'s entries whole, grouped by module under their layers, refused while a round runs; the completion round has its own file, distinct from next.md, opened after the last layer', async () => {
   const base = mkdtempSync(join(tmpdir(), 'planning-'));
   const p = product(base, 'a', TWO, TWO_PLAN);
-  P.trancheOpen(p.o(), OK); epochOpen(p.o()); asBob(p);
+  await P.trancheOpen(p.o()); epochOpen(p.o()); asBob(p);
   put(p.dir, 'build/plan/r2.md', planText('T1', [[1, [['alpha', 'T1-3', 'XYZ-1']]]]));
   assert.throws(() => P.roundOpen(p.o({ planFile: 'build/plan/r2.md' })), /a round is running: layer\(s\) 1, 2/);
   planEdit(p.R, (q) => ({ ...q, layers: { 1: 'CLOSED', 2: 'CLOSED' } }), 'layers run');
@@ -146,10 +164,10 @@ test('R3 roundOpen copies a round\'s entries whole, grouped by module under thei
   assert.deepEqual(P.planFindings(null, planText('T1', [[1, [['alpha', 'T1-6', `XYZ-1 ${'x'.repeat(P.PLAN_LIMIT)}`]]]])).filter((x) => /limit/.test(x)).length, 1);
 });
 
-test('R3 the completion round opens by --completion after the last round, needing no approval', () => {
+test('R3 the completion round opens by --completion after the last round, needing no approval', async () => {
   const base = mkdtempSync(join(tmpdir(), 'planning-'));
   const p = product(base, 'a', TWO, TWO_PLAN);
-  P.trancheOpen(p.o(), OK); epochOpen(p.o()); asBob(p, { 1: 'CLOSED', 2: 'CLOSED' });
+  await P.trancheOpen(p.o()); epochOpen(p.o()); asBob(p, { 1: 'CLOSED', 2: 'CLOSED' });
   assert.equal(P.roundClose(p.o()).next, null);
   put(p.dir, P.completionFile('T1'), planText('T1', [[1, [['alpha', 'T1-5', 'XYZ-1']]]], { title: '# Plan: the completion round · T1' }));
   commitPush(p.R, TRANCHE, [P.completionFile('T1')], 'the completion round');
@@ -159,11 +177,11 @@ test('R3 the completion round opens by --completion after the last round, needin
   assert.match(p.g('log', '-1', '--format=%s'), /round R2 opens \(the completion round\)/);
 });
 
-test('R4 partial records a layer started in part, its modules and the architecture session\'s reason, in the plan; the rest start once it has merged', () => {
+test('R4 partial records a layer started in part, its modules and the architecture session\'s reason, in the plan; the rest start once it has merged', async () => {
   const base = mkdtempSync(join(tmpdir(), 'planning-'));
   const mods = [['alpha', 1, ['XYZ-1']], ['beta', 1, ['XYZ-2']], ['gamma', 1, ['XYZ-3']]];
   const p = product(base, 'a', mods, planText('T1', [[1, [['alpha', 'T1-1', 'XYZ-1'], ['beta', 'T1-2', 'XYZ-2'], ['gamma', 'T1-3', 'XYZ-3']]]]));
-  P.trancheOpen(p.o(), OK);
+  await P.trancheOpen(p.o());
   assert.throws(() => P.partial(p.R, 1, ['alpha'], ''), /names the architecture session's reason/);
   assert.throws(() => P.partial(p.R, 1, ['delta'], 'r'), /delta: no entries in layer 1/);
   assert.throws(() => P.partial(p.R, 4, ['alpha'], 'r'), /layer 4 has no section/);
@@ -175,10 +193,10 @@ test('R4 partial records a layer started in part, its modules and the architectu
   assert.deepEqual(P.partsOf(text, 2), []);
 });
 
-test('R5 stop records once, by the architecture session, at the pin, each unmerged job complete-allowed or abandoned; every role\'s status shows it; resume clears it and moves the pin once', () => {
+test('R5 stop records once, by the architecture session, at the pin, each unmerged job complete-allowed or abandoned; every role\'s status shows it; resume clears it and moves the pin once', async () => {
   const base = mkdtempSync(join(tmpdir(), 'planning-'));
   const p = product(base, 'a', TWO, TWO_PLAN);
-  P.trancheOpen(p.o(), OK); epochOpen(p.o());
+  await P.trancheOpen(p.o()); epochOpen(p.o());
   recordLocal(p.dir, ROLE_FILE, { role: 'job', module: 'alpha', product: '.', session: J1 });
   assert.throws(() => P.stop(p.o({ why: 'x' })), /architecture session's \(BOB's\) act/);
   asBob(p, { 1: 'STARTED' });
@@ -204,11 +222,11 @@ test('R5 stop records once, by the architecture session, at the pin, each unmerg
   assert.throws(() => P.resume(p.o({ version: '0123abc' })), /not stopped/);
 });
 
-test('R6 place puts work found while a round runs at once: the running job as a CHANGE, else the START of a layer not started, else the completion round; deferred only for P19\'s three reasons, named', () => {
+test('R6 place puts work found while a round runs at once: the running job as a CHANGE, else the START of a layer not started, else the completion round; deferred only for P19\'s three reasons, named', async () => {
   const base = mkdtempSync(join(tmpdir(), 'planning-'));
   const mods = [['alpha', 1, ['XYZ-1']], ['beta', 1, ['XYZ-2']], ['gamma', 2, ['XYZ-3']]];
   const p = product(base, 'a', mods, planText('T1', [[1, [['alpha', 'T1-1', 'XYZ-1'], ['beta', 'T1-2', 'XYZ-2']]]]));
-  P.trancheOpen(p.o(), OK); epochOpen(p.o()); asBob(p, { 1: 'STARTED' });
+  await P.trancheOpen(p.o()); epochOpen(p.o()); asBob(p, { 1: 'STARTED' });
   jobLine(p, 'alpha', 'WORKING', 3); jobLine(p, 'beta', 'ARCHIVED', 4);
   assert.throws(() => P.place(p.o({ module: 'alpha', entry: 'make it better' })), /one plan entry/);
   // the running job
@@ -238,13 +256,13 @@ test('R6 place puts work found while a round runs at once: the running job as a 
   assert.deepEqual(P.planFindings(null, planText('T1', [[1, [['alpha', 'T1-1', 'XYZ-1']]]]).replace('make alpha.', 'make alpha. · hard reason: too big')), ['T1-1: its hard reason "too big" is none of P19\'s: Bob\'s decision, a deployment or a measurement that cannot happen inside the tranche, something outside the product']);
 });
 
-test('R7 report states elapsed time, work finished, each deferred entry with its reason, work left, cost, the overhead (commits by purpose, sessions per job, gate runs per merged job, restarts, tokens by role) and the stages run for the first time under a version', () => {
+test('R7 report states elapsed time, work finished, each deferred entry with its reason, work left, cost, the overhead (commits by purpose, sessions per job, gate runs per merged job, restarts, tokens by role) and the stages run for the first time under a version', async () => {
   const base = mkdtempSync(join(tmpdir(), 'planning-'));
   const p = product(base, 'a', [...TWO, ['legacy', 2, ['XYZ-3']]], TWO_PLAN);
   const mods = JSON.parse(readFileSync(join(p.dir, 'build/modules.json'), 'utf8'));
   mods.modules[2].legacy = true; put(p.seed, 'build/modules.json', JSON.stringify(mods)); put(p.seed, 'src/legacy.mjs', 'a\nb\nc\nd\n');
   g(p.seed, 'commit', '-q', '-am', 'legacy'); g(p.seed, 'push', '-q', 'origin', 'main'); p.g('pull', '-q');
-  P.trancheOpen(p.o(), OK); epochOpen(p.o()); asBob(p, { 1: 'CLOSED', 2: 'CLOSED' });
+  await P.trancheOpen(p.o()); epochOpen(p.o()); asBob(p, { 1: 'CLOSED', 2: 'CLOSED' });
   // alpha's job: two sessions (one restart), two commits on its branch, a net removal from the legacy file
   p.g('checkout', '-q', '-b', 'job/alpha'); put(p.dir, 'src/alpha.mjs', 'export const alpha = 2;\n'); p.g('commit', '-q', '-am', 'alpha 1');
   put(p.dir, 'src/legacy.mjs', 'a\n'); p.g('commit', '-q', '-am', 'alpha 2: moved out of the legacy file');
@@ -275,10 +293,10 @@ test('R7 report states elapsed time, work finished, each deferred entry with its
   assert.deepEqual(r.deferred, [{ id: 'T1-2', module: 'beta', reason: "Bob's decision on the layer" }]);
 });
 
-test('R7 report names an entry deferred by place, with its reason; a reason the tranche\'s own plan carries is history, not a deferral', () => {
+test('R7 report names an entry deferred by place, with its reason; a reason the tranche\'s own plan carries is history, not a deferral', async () => {
   const base = mkdtempSync(join(tmpdir(), 'planning-'));
   const p = product(base, 'a', TWO, TWO_PLAN.replace('make beta.', 'make beta. · hard reason: outside the product, last tranche'));
-  P.trancheOpen(p.o(), OK);
+  await P.trancheOpen(p.o());
   assert.deepEqual(P.report(p.o({ tranche: 'T1' })).deferred, []);
   P.place(p.o({ module: 'alpha', entry: '- T1-7 · XYZ-1: needs the vendor\'s API.', defer: 'outside' }));
   const r = P.report(p.o({ tranche: 'T1' }));
@@ -286,10 +304,10 @@ test('R7 report names an entry deferred by place, with its reason; a reason the 
   assert.match(r.text, /^\*\*Deferred\*\* · T1-7 \(alpha\): outside the product: something that does not yet exist$/m);
 });
 
-test('R8 ruling writes one line K<n> · date · area · ruling · why in build/rulings.md, committed with the files it changes; footprint counts the commits by purpose', () => {
+test('R8 ruling writes one line K<n> · date · area · ruling · why in build/rulings.md, committed with the files it changes; footprint counts the commits by purpose', async () => {
   const base = mkdtempSync(join(tmpdir(), 'planning-'));
   const p = product(base, 'a', TWO, TWO_PLAN);
-  P.trancheOpen(p.o(), OK);
+  await P.trancheOpen(p.o());
   assert.throws(() => P.ruling(p.o({ text: 'x' })), /--why/);
   assert.throws(() => P.ruling(p.o({ text: 'x', why: 'y', files: 'no/such.md' })), /no such file/);
   put(p.dir, 'build/requirements/alpha.md', reqFile('alpha', ['XYZ-1', 'XYZ-4']));
@@ -302,10 +320,10 @@ test('R8 ruling writes one line K<n> · date · area · ruling · why in build/r
   assert.deepEqual([fp.kinds.product, fp.merges], [0, 0]); assert.equal(fp.kinds['build state'], 3); assert.equal(fp.bookkeeping, '100 %');
 });
 
-test('R9 no function reads or writes outside the product\'s own repository: two products on one checkout of the process run tranches independently', () => {
+test('R9 no function reads or writes outside the product\'s own repository: two products on one checkout of the process run tranches independently', async () => {
   const base = mkdtempSync(join(tmpdir(), 'planning-'));
   const a = product(base, 'a', TWO, TWO_PLAN), b = product(base, 'b', [['solo', 1, ['XYZ-1']]], planText('T7', [[1, [['solo', 'T7-1', 'XYZ-1']]]]));
-  const ta = P.trancheOpen(a.o(), OK), tb = P.trancheOpen(b.o(), OK);
+  const ta = await P.trancheOpen(a.o()), tb = await P.trancheOpen(b.o());
   assert.deepEqual([ta.tranche, tb.tranche], ['T1', 'T7']);
   epochOpen(a.o()); epochOpen(b.o()); asBob(a); asBob(b);
   P.ruling(a.o({ text: 'a only', why: 'a' }));
@@ -324,13 +342,13 @@ test('R9 no function reads or writes outside the product\'s own repository: two 
   assert.equal(P.report(a.o({ tranche: 'T1' })).entries.length, 2);
 });
 
-test('R10 nothing assumes a product\'s size or shape: one layer of one module, and three layers of several, run the same', () => {
+test('R10 nothing assumes a product\'s size or shape: one layer of one module, and three layers of several, run the same', async () => {
   const base = mkdtempSync(join(tmpdir(), 'planning-'));
   const small = product(base, 's', [['only', 1, ['XYZ-1']]], planText('S1', [[1, [['only', 'S1-1', 'XYZ-1']]]]));
   const mods = [['a1', 1, ['XYZ-1']], ['a2', 1, ['XYZ-2']], ['b1', 2, ['XYZ-3']], ['c1', 3, ['XYZ-4']], ['c2', 3, ['XYZ-5']]];
   const big = product(base, 'b', mods, planText('B4', [[1, [['a1', 'B4-1', 'XYZ-1'], ['a2', 'B4-2', 'XYZ-2']]], [2, [['b1', 'B4-3', 'XYZ-3']]], [3, [['c1', 'B4-4', 'XYZ-4'], ['c2', 'B4-5', 'XYZ-5']]]]));
   for (const [p, layers] of [[small, [1]], [big, [1, 2, 3]]]) {
-    const t = P.trancheOpen(p.o(), OK);
+    const t = await P.trancheOpen(p.o());
     assert.deepEqual(t.layers, layers);
     epochOpen(p.o()); asBob(p, Object.fromEntries(layers.map((l) => [l, 'CLOSED'])));
     assert.equal(P.roundClose(p.o()).round, 1);

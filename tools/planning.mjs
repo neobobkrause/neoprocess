@@ -2,9 +2,10 @@
 // has; work found while a round runs placed at once; a stop and a resume as records; the tranche report with the process's
 // own overhead measured. Extracted from proc-legacy (N2-16 to N2-18); tools/proc.mjs re-exports what it still calls.
 //
-// planning uses `record` and `requirements` only (build/modules.json). What a tranche's open and close also need from
-// later modules (the grant check, the words check, the open asks, the artifacts, the whole checks) is given by the caller
-// as `deps`; a check not given is refused, never skipped (R1, R2).
+// planning uses `platform` (the grant check), `record`, `requirements` and `architecture` (the words check, the whole-product
+// checks), all earlier in the order, and imports them (K29). What a tranche's close needs from later modules (the open asks:
+// sessions or messages; the artifacts' regeneration: gate) is given by the caller as `deps`; one not given is refused,
+// never skipped (R2).
 //
 // Every path read or written is under the product's own repository (R9): a path a caller names is refused outside it.
 import { spawnSync } from 'node:child_process';
@@ -12,6 +13,9 @@ import { rmSync } from 'node:fs';
 import { join, resolve, relative, isAbsolute } from 'node:path';
 import { TRANCHE, refuse, repo, ghRepo, readRole, recordLocal, ROLE_FILE, unpushed, commitPush, pruneRef, epoch, needEpoch, stateRead, stateList, stateWrite, parsePlan, planEdit, jobFiles, jobLines, stop as recordStop, resume as recordResume, pinOf, PLAN_FILE, metricsFile, CHOICES } from './record.mjs';
 import { parse } from './requirements.mjs';
+import { grantsHeld } from './platform.mjs';
+import { run as runChecks } from '../checks/run.mjs';
+import { checkWords, WORDS_CONFIG } from '../checks/words.mjs';
 
 const SESSION = /^session_[0-9A-Za-z]+$/;
 const NAME = /^[A-Z][A-Z0-9-]* #\d+$/;
@@ -165,14 +169,12 @@ export function roundClose(o) {
 // to main (which holds it whole once the close PR has merged; a tip not on main is a running tranche), and the plan is
 // copied whole from `next.md` to `current.md`: its title names the tranche, its Status line the pinned process commit
 // (MNT-3), its legacy census comes before its first layer (PLN 8). Refused while an archived plan on main reads CLOSING,
-// while the words check reports a finding, or while the grant check is missing, failed or older than a day.
-// deps: { grants(R) → null | why, words(R) → findings[] }, given by the caller.
-export function trancheOpen(o, deps = {}) {
+// while the words check reports a finding (where the product configures it, `build/words.json`, as the checks' runner
+// runs it), or while the grant check is missing, failed or older than a day (platform's `grantsHeld`).
+export async function trancheOpen(o) {
   const R = repo(o.product);
-  if (typeof deps.grants !== 'function') refuse('tranche open: the grant check is not given (PERMISSIONS §10.3): the tranche does not open');
-  if (typeof deps.words !== 'function') refuse('tranche open: the words check is not given: the tranche does not open');
-  const held = deps.grants(R); if (held) refuse(held);   // PERMISSIONS §10.3: a missing grant stops the opening, never a step
-  const words = deps.words(R) || []; if (words.length) refuse(`the words check reports ${words.length} finding(s): ${words.slice(0, 5).join('; ')}`);
+  const held = grantsHeld(R); if (held) refuse(held);   // PERMISSIONS §10.3: a missing grant stops the opening, never a step
+  if (R.read(WORDS_CONFIG) !== null) { const w = (await checkWords(R.dir)).failures.map((f) => (typeof f === 'string' ? f : f.finding)); if (w.length) refuse(`the words check reports ${w.length} finding(s): ${w.slice(0, 5).join('; ')}`); }
   R.fetch('main', TRANCHE);
   const tip = R.g(['rev-parse', 'origin/main']);
   if (R.heads(`refs/heads/${TRANCHE}`).length) { try { R.g(['merge-base', '--is-ancestor', `origin/${TRANCHE}`, tip]); } catch { refuse(`${TRANCHE} holds work not on main: the running tranche closes first (its close PR merged, recorded by \`proc tranche merged\`)`); } }
@@ -274,14 +276,16 @@ function base(R, a, b) {
     for (const [x, sha] of Object.entries(held)) if (sha) R.g(['update-ref', `refs/remotes/${x}`, sha]);
   }
 }
-function at(R, ref, fn) { const back = R.branch(), head = R.g(['rev-parse', 'HEAD']); R.g(['checkout', '-q', '--detach', ref]); try { return fn(); } finally { R.g(['checkout', '-q', back === 'HEAD' ? head : back]); } }
+// The whole-product checks' findings at a commit (architecture's `run`, never written to the result file here).
+const findingsAt = async (R, ref, fetch = false) => new Set((await runChecks(R.dir, { ref, fetch, write: false })).findings.map((f) => f.finding));
 
 // JOB-LIFE §1, §10; P12: every round archived, every job merged and archived, no ask open, nothing owed; main merged in
-// (never a rebase); the artifacts and the checks once more; the plan's archive written with each entry's outcome and the
-// tranche's measured usage (the tranche report, R7); the plan CLOSING; the one close PR printed and owed.
-// deps: { asks(R) → open ask ids, regenerate(R) → { changed, stale }, checks(R) → { fails: Set } }, given by the caller.
-export function trancheClose(o, deps = {}) {
-  for (const k of ['asks', 'regenerate', 'checks']) if (typeof deps[k] !== 'function') refuse(`tranche close: the ${k} check is not given: the tranche does not close`);
+// (never a rebase); the artifacts and the whole-product checks once more, a finding the tranche's base had not this close's;
+// the plan's archive written with each entry's outcome and the tranche's measured usage (the tranche report, R7); the plan
+// CLOSING; the one close PR printed and owed.
+// deps (later modules, K29): { asks(R) → open ask ids, regenerate(R) → { changed, stale } }, given by the caller.
+export async function trancheClose(o, deps = {}) {
+  for (const [k, what] of [['asks', 'the open asks'], ['regenerate', "the artifacts' regeneration"]]) if (typeof deps[k] !== 'function') refuse(`tranche close: ${what} (deps.${k}) not given: the tranche does not close`);
   const R = repo(o.product); on(R, TRANCHE);
   const e = needEpoch(R), plan = parsePlan(stateRead(R, 'plan.md') || '');
   if (R.read(PLAN)) refuse(`a round is open (${PLAN} exists): close it first`);
@@ -300,10 +304,10 @@ export function trancheClose(o, deps = {}) {
   const art = deps.regenerate(R);
   if (art.stale.length) refuse(`artifacts stale after regenerating: ${art.stale.join(', ')}`);
   if (art.changed.length) { R.g(['add', '--', ...art.changed.map(R.rel)]); R.g(['commit', '-q', '-m', `artifacts regenerated at the tranche's close: ${art.changed.join(', ')}`]); }
-  const found = deps.checks(R);
-  if (found.fails.size) {
+  const found = await findingsAt(R, 'HEAD', true);
+  if (found.size) {
     const start = base(R, 'origin/main', 'HEAD') ?? refuse('no common history with main');
-    const old = at(R, start, () => deps.checks(R)).fails, added = [...found.fails].filter((x) => !old.has(x));
+    const old = await findingsAt(R, start), added = [...found].filter((x) => !old.has(x));
     if (added.length) refuse(`checks: ${added.length} finding(s) new since the tranche opened: ${added.slice(0, 10).join('; ')}`);
   }
   // the tranche's report, the archive of its plan with each entry's outcome and its measured usage (R2, R7)

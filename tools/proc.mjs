@@ -65,8 +65,8 @@ import { Refused, processHead, versionCommand, ownerSecret, dispatch, grantsChec
 // The requirements module (layer 2): the requirements file's parser, service blocks, the mark strike, the measurement line, a job's reading set.
 import { serviceBlocks, readingSet, strike, usesOf, budgetOf, overrun, MEASUREMENT_RULE } from './requirements.mjs';
 // Tranches, rounds, a layer in part, stop and resume, placing, the report, rulings (layer 3; N2-16 to N2-18).
-import { tranche, trancheId, archivedTranche, roundOpen, roundClose, trancheCarry, trancheMerged, footprint, ruling, partialCheck, partial, place, report, stop, resume, trancheOpen as planTrancheOpen, trancheClose as planTrancheClose } from './planning.mjs';
-export { tranche, trancheId, archivedTranche, PLAN_LIMIT, roundOpen, roundClose, trancheCarry, trancheMerged, footprint, ruling, partial, partsOf, place, report, stop, resume } from './planning.mjs';
+import { tranche, trancheId, archivedTranche, roundOpen, roundClose, trancheCarry, trancheMerged, footprint, ruling, partialCheck, partial, place, report, stop, resume, trancheOpen, trancheClose as planTrancheClose } from './planning.mjs';
+export { tranche, trancheId, archivedTranche, PLAN_LIMIT, trancheOpen, roundOpen, roundClose, trancheCarry, trancheMerged, footprint, ruling, partial, partsOf, place, report, stop, resume } from './planning.mjs';
 export { versionCommand as versionCheck, GRANTS_FILE, GRANTS_PRODUCT, GRANTS_FRESH_H, EXPIRY_WARN_D } from './platform.mjs';
 
 export const PROCESS = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -1743,10 +1743,8 @@ jobs:
   return { files: Object.keys(files), drift, written: o.check ? [] : drift.map((d) => d.split(':')[0]) };
 }
 
-// planning's checks from the modules after it, given by the dispatcher (planning uses record and requirements only, R1, R2)
-const wordsFindings = (R) => (R.read('build/words.json') === null ? [] : `${spawnSync('node', [join(PROCESS, 'checks/words.mjs'), R.dir], { encoding: 'utf8' }).stdout}`.split('\n').filter((l) => l.startsWith('FAIL')));
-const PLANNING_DEPS = { grants: (R) => grantsHeld(R), words: wordsFindings, asks: (R) => asks(R).filter((a) => a.status !== 'CLOSED').map((a) => a.id), regenerate, checks: allChecks };
-export const trancheOpen = (o) => planTrancheOpen(o, PLANNING_DEPS);
+// what the tranche's close needs from modules after planning, given by the dispatcher (K29: the open asks, the artifacts)
+export const PLANNING_DEPS = { asks: (R) => asks(R).filter((a) => a.status !== 'CLOSED').map((a) => a.id), regenerate };
 export const trancheClose = (o) => planTrancheClose(o, PLANNING_DEPS);
 
 // PERMISSIONS §9: a development repository and its two rulesets (SETUP-STEPS), made by this command with the process's
