@@ -84,7 +84,7 @@
 **maintenance**
 - N2-38 · MNT-3, MNT-4, MNT-6, MNT-8: `tools/maintenance.mjs` takes issue file/ack/close/reply/seen, productReports, processReplies; `processRefresh` becomes `version newer` (an anonymous read of `main`'s tags against the pin, called by `layer close` to offer the stop) and `processBehind` becomes the one start-time check (N2-4); the hourly refresh and per-command checks removed.
 - N2-39 · MNT-7, MNT-10: the version note (`VERSIONS.md`): per version, the layers and stages it has been proven by with their product sizes, and whether it holds the certification mark; `layer close` appends the layer's proof row; the mark is written only by `tranche merged` after a release's deployment and walk on a real product.
-- N2-40 · MNT-1, MNT-2, MNT-5: the lane's record (`lane-neoprocess/`) becomes this product's build state: DRYRUN's rows migrate to the version note; fixes that do not block are placed in `next.md` for the next process tranche, never merged mid-layer.
+- N2-40 · MNT-1, MNT-2, MNT-5: the lane's record (`lane-neoprocess/`) becomes this product's build state: DRYRUN's rows migrate to the version note; fixes that do not block are placed in `next.md` for the next process tranche, never merged mid-layer. With it, the rulebook lines REQUIREMENTS.md §14 names are rewritten to the accepted requirements, INT 3's "the size limits" among them (the gate runs the module's own suite and its scoped checks, GAT-2; no byte limit refuses, SES-5) (gate's report, K27).
 
 **shims**
 - N2-41 · SHM-1: `tools/shims.mjs` takes `shims`, `settingsText` (permissions only; no hooks, no env), the CLAUDE.md template naming the pinned commit and the one clone command, the gate workflow from the gate module's template, the prune workflow; `init`, `initCheck`, `onboardStart`.
@@ -105,6 +105,7 @@ proc-legacy (no job: retired by the jobs above)
 **record**
 - N2-47 · REC-7's fixture (K3): N2-8's halted-build fixture rebuilt from a frozen copy of Civicsmith's real state branch and handoff of 30 Oct, once a session on this account can read that repository (the record job built it from the measured description, its report of 30 Oct).
 - N2-48 · REC-3, ARC-5 (architecture's report J2, K22): `status` lists the checks' findings from their one result file (`checks/result.json`, or the manifest row's path), read as JSON by record itself, since record is earlier than architecture and cannot import it.
+- N2-54 · REC-1, record R5 and R12 (gate's report, K27): `paths()` names every record of the architecture session on the tranche, `build/rulings.md` and `build/summaries/` among them, so no record path triggers a gate (GAT-6).
 
 **requirements**
 - N2-50 · REQ-1, requirements R8 (architecture's report, K23): `parse` and `marks` count a bold `**R<n>**` wherever it stands on its line (an id after a service's signature, as products' files write it: BOB #38's ruling), so the parser accepts every requirements file on a product's tranche as it stands.
