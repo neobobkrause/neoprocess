@@ -48,8 +48,12 @@
     {
       "id": "requirements",
       "layer": 2,
-      "paths": [],
-      "tests": [],
+      "paths": [
+        "tools/requirements.mjs"
+      ],
+      "tests": [
+        "tools/test/requirements.test.mjs"
+      ],
       "uses": [
         "record"
       ],
