@@ -1,8 +1,7 @@
 # gate (transient)
 
-**Status** · GATE #1 · session_012hdw2StqkU6bBuPANTaH3p · WORKING · PR #133
-**Runs** · 1
-**Owed** · none
+**Status** · GATE #1 · session_012hdw2StqkU6bBuPANTaH3p · COMPLETE · PR #133
+**Runs** · 2
+**Owed** · comment; ready
 **Model** · opus
-**Review** · review · K15: the module's one independent review; the gate every module's pull request runs · concerns: diff of 698 lines (over 400); provided service changed (27 export line(s) differ) · gaps: 6 · 2026-11-07
 **Reviews** · 1
