@@ -6,3 +6,4 @@ session_01RAN5enucmXTQSLEYL3QPrK,job,PLATFORM #1,platform,,,,,6,907,1/1,unmeasur
 ,defect,,proc-legacy,,,,,,,unknown,tools/test/lib.test.mjs:80 failed once inside architecture's job complete (memory peaks empty at :95) and passed 3 of 3 alone: an intermittent legacy test (7 Nov)
 session_012hdw2SRgbqwdDGPhXQvSLS,job,REQUIREMENTS #1,requirements,22716441,403167,1900,83888,2,257,1/1,
 session_012hdw2TSPK1pQS5pvLinrn7,job,ARCHITECTURE #1,architecture,46941662,744120,770,164407,4,2928,1/1,
+,defect,REQUIREMENTS #1,requirements,,,,,,,1/1,parse leaves a statement under a bold line it does not read as a service header in no block  with no finding (planning's report  K26; fix N2-53)
