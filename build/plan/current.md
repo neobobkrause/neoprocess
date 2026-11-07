@@ -108,6 +108,7 @@ proc-legacy (no job: retired by the jobs above)
 
 **requirements**
 - N2-50 · REQ-1, requirements R8 (architecture's report, K23): `parse` and `marks` count a bold `**R<n>**` wherever it stands on its line (an id after a service's signature, as products' files write it: BOB #38's ruling), so the parser accepts every requirements file on a product's tranche as it stands.
+- N2-53 · REQ-1, requirements R1 (planning's report, K26): a statement in Provides under a bold line `parse` reads as no service header is a finding naming the line, never a statement in no block with no finding.
 
 **architecture**
 - N2-51 · architecture R8 and its Uses (K23): the coverage check counts ids through `requirements.parse` and `marks` once N2-50 has merged, its own `requirementIds` removed.

@@ -10,7 +10,7 @@ The process fixed and built under itself: flaw reports in and replies out; one p
 
 ### Provides
 
-**issue file / ack / close / reply / seen; productReports; processReplies**
+**issue(R, action, …) / productReports(R) / processReplies(R)**
 - **R1** A flaw report is filed from any session by one command, listed by the process's architecture session at each `status`, acknowledged, and answered by `main`; a flaw found anywhere is never fixed in place. (MNT-6; GOV 5) *(not yet met: N2)*
 
 **versionCheck(R) → PROCESS OK | STALE**
