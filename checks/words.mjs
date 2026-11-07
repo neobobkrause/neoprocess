@@ -34,8 +34,10 @@
 // is rewritten to read it by that key. Every finding carries its key (the arm), module, file and line (R3), and the
 // check reads the product at a commit (R10).
 // Usage: node checks/words.mjs <product-root> [module ...] [--release]
-import { readFileSync, existsSync } from 'node:fs';
-import { join, basename } from 'node:path';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, basename, dirname } from 'node:path';
+import { importsOf, resolveImport } from './architecture.mjs';
 import { pathToFileURL } from 'node:url';
 import { snapshot, readModules, ownerIndex, notProduct, finder, report } from './lib.mjs';
 
@@ -348,17 +350,30 @@ export async function loadOpNames(root) {
     const d = JSON.parse(j);
     if (Array.isArray(d)) for (const x of d) names.set(x, null); else for (const [k, v] of Object.entries(d)) names.set(k, v);
   }
-  // The declarations are code: imported from the checkout only where its copy is the committed one (R10), else unread.
-  const od = (wordsConfig(S) || {}).opDeclarations, decl = od ? join(S.R.dir, od) : null;
-  if (decl && S.read(od) !== null && existsSync(decl) && readFileSync(decl, 'utf8') === S.read(od)) {
+  // The declarations are code, imported from the commit (R10, K23): the file and the relative imports it reaches, as the
+  // commit holds them, written to a scratch directory and imported from there; the working tree is never read.
+  const od = (wordsConfig(S) || {}).opDeclarations;
+  if (od && S.read(od) !== null) {
+    const dir = mkdtempSync(join(tmpdir(), 'words-ops-'));
     try {
-      const m = await import(pathToFileURL(decl).href);
+      const files = new Set(S.files), todo = [od], done = new Set();
+      while (todo.length) {
+        const f = todo.pop();
+        if (done.has(f)) continue;
+        done.add(f);
+        const text = S.read(f);
+        if (text === null) continue;
+        mkdirSync(dirname(join(dir, f)), { recursive: true });
+        writeFileSync(join(dir, f), text);
+        for (const spec of importsOf(text)) { const t = resolveImport(files, f, spec); if (t) todo.push(t); }
+      }
+      const m = await import(`${pathToFileURL(join(dir, od)).href}?commit=${S.commit}`);
       for (const k of Object.keys(m.OPS || {})) if (!names.has(k)) names.set(k, null);
       const list = (v) => (Array.isArray(v) ? v : v && typeof v === 'object' ? Object.keys(v) : []);
       for (const [fam, v] of Object.entries(m.OP_FAMILIES || {})) {
         for (const fld of ['kinds', 'acts', 'proposals', 'reads', 'extra']) for (const o of list(v?.[fld])) if (typeof o === 'string' && !names.get(o)) names.set(o, v.owner || fam);
       }
-    } catch { /* declarations unreadable: the ops arm degrades */ }
+    } catch { /* declarations unreadable: the ops arm degrades */ } finally { rmSync(dir, { recursive: true, force: true }); }
   }
   return names;
 }

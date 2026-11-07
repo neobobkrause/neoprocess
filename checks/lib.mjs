@@ -33,6 +33,30 @@ export function snapshot(root = '.', { ref = 'HEAD' } = {}) {
   return { isSnapshot: true, R, ref, commit, prefix, at, files, read, has, list, git: (args) => R.raw(args), q };
 }
 
+// N2-45: the record of the epoch, read at the local ref of its state branch (record's layout: `epoch.md`, `plan.md`,
+// `jobs/<module>.md`). None, or more than one open, reads as no record: no entry is pending.
+const JOB_LINE = /^\*\*Status\*\* · ([A-Z][A-Z0-9-]* #\d+) · (session_[0-9A-Za-z]+|-) · (.+?)(?: · PR #(\d+))?$/m;
+// A live job: its line reads any state but MERGED or ARCHIVED (R6, K23).
+export const LIVE_JOB = { test: (state) => !!state && !/^(?:MERGED|ARCHIVED)\b/.test(state) };
+export function stateRecord(S) {
+  const refs = (S.q(['for-each-ref', '--format=%(refname)', 'refs/remotes/origin/state/']) || '').split('\n').filter(Boolean);
+  const open = refs.filter((r) => { const e = S.q(['show', `${r}:epoch.md`]); return e !== null && !/^closed /m.test(e); });
+  if (open.length !== 1) return null;
+  const ref = open[0];
+  const layers = {};
+  for (const part of ((S.q(['show', `${ref}:plan.md`]) || '').match(/^\*\*Layers\*\* · (.*)$/m)?.[1] || '').split(';')) { const m = part.trim().match(/^(\d+) (\S+)/); if (m) layers[m[1]] = m[2]; }
+  const job = (m) => { const t = S.q(['show', `${ref}:jobs/${m}.md`]); const x = t && t.match(JOB_LINE); return x ? x[3] : null; };
+  return { ref, layers, job };
+}
+
+// The line of each module in build/modules.json's text, by its index in the list: where the module's own `"id"` key
+// stands (the n-th module's is the n-th `"id"` key at the list's depth; a one-line map gives line 1 to each); null if unknown.
+export function moduleLines(text, mods) {
+  const ids = [...String(text || '').matchAll(/"id"\s*:/g)].map((m) => m.index);
+  const at = (i) => String(text).slice(0, i).split('\n').length;
+  return mods.map((m, i) => (ids.length === mods.length ? at(ids[i]) : null));
+}
+
 // The product's generated artifacts (PRODUCT-SUPPLIES): rows of build/manifest.md's table
 // `| \`<path>\`[, \`<path>\`…] | <owner> | \`<regenerate>\` | \`<verify>\` |`, in the table's order.
 export function artifactRows(text) {

@@ -5,7 +5,7 @@
 // (`build/words.json`; rulebook BLD 5). Scoped to a module: format's findings about that module or about no module (a
 // pending map entry is never a failure), architecture, coverage, fixtures and words over the module's files, channels
 // (product-level, as in the whole run), and ownership when a base is given (the job's diff against it, its added legacy
-// lines listed in the result). It prints each check's failures and summary line, as the
+// lines listed in the result; with no base given, the tranche's, and with no tranche ownership is a `not-run` finding). It prints each check's failures and summary line, as the
 // checks always have, and writes one machine-readable result (each finding's check, key, module, file and line, R3) at
 // the path the manifest names (a `build/manifest.md` row naming the checks' result, default `checks/result.json`), which
 // the gate and `status` read through `readResult`.
@@ -16,7 +16,7 @@
 import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { repo } from '../tools/record.mjs';
+import { repo, TRANCHE } from '../tools/record.mjs';
 import { snapshot, report } from './lib.mjs';
 import { checkArchitecture } from './architecture.mjs';
 import { checkCoverage } from './coverage.mjs';
@@ -59,7 +59,13 @@ export async function run(R = '.', { module = null, base = null, ref = 'HEAD', f
   ];
   if (S.read('build/channels.md') !== null) checks.push(['channels', () => checkChannels(S)]);   // product-level: in every run
   if (S.read(WORDS_CONFIG) !== null) checks.push(['words', () => checkWords(S, only)]);
-  if (module && base) checks.push(['ownership', () => checkOwnership(S, module, base, ref)]);
+  // A scoped run is the job's gate run, so ownership always runs in it: against the base given, else the tranche's (origin's
+  // ref first, as the gate's merge base reads it); with neither, ownership is a finding of its own, not run, never a silent pass (R2).
+  let own = null;
+  if (module) {
+    own = base || [`origin/${TRANCHE}`, TRANCHE].find((b) => S.q(['rev-parse', '--verify', '-q', `${b}^{commit}`]) !== null) || null;
+    checks.push(['ownership', () => (own ? checkOwnership(S, module, own, ref) : { findings: [{ check: 'ownership', key: 'not-run', module, file: null, line: null, finding: `ownership: not run for ${module}: no base was given and the product has no ${TRANCHE} branch` }], failures: [], added: [], edited: [], summary: 'not run' })]);
+  }
   const findings = [], pending = [], summaries = {}, lines = [];
   let listed = null;   // ownership's added and edited legacy lines, listed for the architecture session's reading (R5)
   for (const [name, fn] of checks) {
@@ -76,7 +82,7 @@ export async function run(R = '.', { module = null, base = null, ref = 'HEAD', f
     lines.push(`${name}: ${r.summary}; ${failures.length} failure${failures.length === 1 ? '' : 's'}`);
     if (print) { if (name === 'ownership') { for (const a of r.added) console.log(`ADDED ${a}`); for (const e of r.edited) console.log(`EDITED ${e}  (only removes from the line it replaces: a removal)`); } report(name, failures, r.summary); }
   }
-  const result = { commit: S.commit, ref, module, base, ok: findings.length === 0, findings, pending, summaries, ...(listed ? { listed } : {}) };
+  const result = { commit: S.commit, ref, module, base: own ?? base, ok: findings.length === 0, findings, pending, summaries, ...(listed ? { listed } : {}) };
   if (write) {
     const out = join(Rp.dir, resultPath(S));
     mkdirSync(dirname(out), { recursive: true });

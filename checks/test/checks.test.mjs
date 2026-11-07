@@ -90,6 +90,20 @@ test('R1: modules answers build/modules.json in its one total order; a map that 
   const early = edit(MODULES(), (j) => { j.modules = [j.modules[2], j.modules[0], { ...j.modules[1], layer: 1 }]; j.modules[0].layer = 1; j.modules[1].uses = ['*earlier']; });
   const e = repo(base({ 'build/modules.json': early, 'build/layers.md': '| layer | name | modules |\n| --- | --- | --- |\n| 1 | One | legacy, a, b |\n' }));
   assert.deepEqual(modules(e.root).findings.map((f) => [f.key, f.module]), [['wildcard-not-legacy', 'a'], ['from-not-after', 'b']]);
+  // a module the order cannot place is a finding with its line in build/modules.json, never skipped (K23)
+  const odd = JSON.stringify({ not_product: ['build/'], modules: [
+    { id: 'a', layer: 1, paths: ['src/a/'], tests: ['test/a/'], uses: [] },
+    { id: 'a', layer: 1, paths: ['src/a2/'], tests: [], uses: [] },
+    { id: 'n', paths: [], tests: [], uses: [] },
+    { id: 's', layer: '2', paths: [], tests: [], uses: [] },
+    { id: 'Bad Id', layer: 2, paths: [], tests: [], uses: [] },
+  ] }, null, 1);
+  const o = repo(base({ 'build/modules.json': odd }));
+  const lineOfId = (n) => odd.split('\n').map((l, k) => (/"id"/.test(l) ? k + 1 : 0)).filter(Boolean)[n];
+  assert.deepEqual(modules(o.root).findings.map((f) => [f.key, f.module ?? null, f.line]), [['id-twice', 'a', lineOfId(1)], ['layer-invalid', 'n', lineOfId(2)], ['layer-invalid', 's', lineOfId(3)], ['id-invalid', null, lineOfId(4)]]);
+  assert.deepEqual(keysOf(checkArchitecture(repo(base({ 'build/modules.json': '{ "modules": [] }' })).root)).slice(0, 1), ['no-modules']);
+  // the map findings carry the module's line too
+  assert.ok(modules(broken.root).findings.every((f) => Number.isInteger(f.line)));
   // a module job's scoped run names only its own module's map findings
   assert.deepEqual(keysOf(checkArchitecture(broken.root, ['b'])), []);
   assert.deepEqual(keysOf(checkArchitecture(broken.root, ['a'])), ['use-not-earlier']);
@@ -101,20 +115,28 @@ test('R2: run is one function: scoped to the module named, or whole over the pro
   const r = repo(base({ 'src/a/index.mjs': "import { b } from '../b/index.mjs';\n", 'build/requirements/b.md': REQ('- **R1** one\n- **R2** two'), 'build/modules.json': edit(MODULES(), (j) => { j.modules[1].paths.push('src/b/gone.mjs'); }) }));
   const whole = await run(r.root, { write: false });
   assert.deepEqual(whole.findings.map((f) => [f.check, f.key, f.module]), [['format', 'path-missing', 'b'], ['architecture', 'later-import', 'a'], ['coverage', 'id-unnamed', 'b']]);
+  // a scoped run is the job's gate run: with no base and no tranche branch, ownership is named not run, never a pass
   const a = await run(r.root, { module: 'a', write: false });
-  assert.deepEqual(a.findings.map((f) => [f.check, f.key, f.module]), [['architecture', 'later-import', 'a']]);
+  assert.deepEqual(a.findings.map((f) => [f.check, f.key, f.module]), [['architecture', 'later-import', 'a'], ['ownership', 'not-run', 'a']]);
+  assert.equal(a.ok, false);
+  // with a tranche branch, ownership runs against it by default (origin's ref first, as the gate reads it)
+  r.g('branch', 'tranche');
   const b = await run(r.root, { module: 'b', write: false });
   assert.deepEqual(b.findings.map((f) => [f.check, f.key, f.module]), [['format', 'path-missing', 'b'], ['coverage', 'id-unnamed', 'b']]);
+  assert.equal(b.base, 'tranche');
+  assert.equal(b.summaries.ownership.includes('between tranche and HEAD'), true);
+  r.g('update-ref', 'refs/remotes/origin/tranche', 'HEAD');
+  assert.equal((await run(r.root, { module: 'b', write: false })).base, 'origin/tranche');
   // a product-level finding (no module) belongs to every scoped run, as to the whole one
   r.commit({ 'build/layers.md': `${LAYERS}<<<<<<< ours\n` });
-  assert.ok((await run(r.root, { module: 'a', write: false })).findings.some((f) => f.key === 'conflict-marker'));
+  assert.ok((await run(r.root, { module: 'a', base: 'HEAD~1', write: false })).findings.some((f) => f.key === 'conflict-marker'));
   // with a base, the scoped run is the job's gate run: ownership joins it
   r.commit({ 'src/a/more.mjs': 'export const more = 1;\n' });
   const gate = await run(r.root, { module: 'b', base: 'HEAD~1', write: false });
   assert.deepEqual(gate.findings.filter((f) => f.check === 'ownership').map((f) => [f.key, f.file]), [['outside', 'src/a/more.mjs']]);
   assert.equal(gate.ok, false);
   // the command is the same function: --module is the one switch, and the exit code says red
-  const cmd = spawnSync('node', [fileURLToPath(new URL('../run.mjs', import.meta.url)), r.root, '--module', 'a', '--no-fetch'], { encoding: 'utf8' });
+  const cmd = spawnSync('node', [fileURLToPath(new URL('../run.mjs', import.meta.url)), r.root, '--module', 'a', '--base', 'HEAD~1', '--no-fetch'], { encoding: 'utf8' });
   assert.equal(cmd.status, 1);
   assert.deepEqual(readResult(r.root).findings.map((f) => [f.check, f.key]), [['format', 'conflict-marker'], ['architecture', 'later-import']]);
   assert.equal(readResult(r.root).module, 'a');
@@ -160,13 +182,13 @@ test('R4: every relative import names its own module or a declared earlier one; 
   // an unowned product file fails, a not_product file does not
   assert.deepEqual(pick(checkArchitecture(repo(base({ 'stray.mjs': 'x', 'docs/note.md': 'x' })).root)), [['unowned', 'stray.mjs']]);
   // an import of a later module
-  assert.deepEqual(pick(checkArchitecture(repo(base({ 'src/a/index.mjs': "import { b } from '../b/index.mjs';\n" })).root), 'key', 'module', 'file', 'target', 'used'),
-    [['later-import', 'a', 'src/a/index.mjs', 'src/b/index.mjs', 'b']]);
+  assert.deepEqual(pick(checkArchitecture(repo(base({ 'src/a/index.mjs': "// a comment\n/* a block\n   comment */\nconst x = 1;\nimport {\n  b,\n} from '../b/index.mjs';\n" })).root), 'key', 'module', 'file', 'line', 'target', 'used'),
+    [['later-import', 'a', 'src/a/index.mjs', 7, 'src/b/index.mjs', 'b']]);   // the line its specifier stands on
   // an import of an earlier module not declared in uses
   const undeclared = repo(base({ 'build/modules.json': edit(MODULES(), (j) => { j.modules[1].uses = []; }) }));
-  assert.deepEqual(pick(checkArchitecture(undeclared.root), 'key', 'module', 'used'), [['undeclared-import', 'b', 'a']]);
+  assert.deepEqual(pick(checkArchitecture(undeclared.root), 'key', 'module', 'line', 'used'), [['undeclared-import', 'b', 1, 'a']]);
   // an import of a file no module owns because it is not product
-  assert.deepEqual(pick(checkArchitecture(repo(base({ 'docs/helper.mjs': 'x\n', 'src/a/index.mjs': "import '../../docs/helper.mjs';\n" })).root), 'key', 'target'), [['not-product-import', 'docs/helper.mjs']]);
+  assert.deepEqual(pick(checkArchitecture(repo(base({ 'docs/helper.mjs': 'x\n', 'src/a/index.mjs': "export const y = 2;\nimport '../../docs/helper.mjs';\n" })).root), 'key', 'line', 'target'), [['not-product-import', 2, 'docs/helper.mjs']]);
   // the most specific path owns a nested file: the legacy module's test/ holds the extracted module's test/b/
   const nested = repo(base({ 'build/modules.json': edit(MODULES(), (j) => { j.modules[2].tests = ['test/']; }), 'test/legacy.test.mjs': "import '../src/legacy.mjs';\n", 'test/b/b.test.mjs': "import '../../src/b/index.mjs';\n// R1\n" }));
   assert.deepEqual(checkArchitecture(nested.root).findings, []);
@@ -383,7 +405,7 @@ test('R6: a map entry naming no file is pending beside its module\'s live job li
   // no record: the entries fail, naming the module and the entry
   assert.deepEqual(pick(checkFormat(r.root), 'key', 'module', 'field', 'path'), [['path-missing', 'b', 'paths', 'src/b/new.mjs'], ['path-missing', 'b', 'tests', 'test/b/new.test.mjs']]);
   // b's job reads WORKING (or a recorded wait) and layer 2 is open: pending, no failure
-  for (const st of ['STARTING', 'WORKING', 'WAITING: Q1 to BOB']) {
+  for (const st of ['STARTING', 'WORKING', 'WAITING: Q1 to BOB', 'COMPLETE', 'REOPENED']) {   // any state but MERGED or ARCHIVED (K23)
     stateBranch(r, { jobs: { b: st }, layers: '1 CLOSED; 2 STARTED' });
     const f = checkFormat(r.root);
     assert.deepEqual(f.findings, [], st);
@@ -392,9 +414,15 @@ test('R6: a map entry naming no file is pending beside its module\'s live job li
   // the layer has closed: the same entries fail
   stateBranch(r, { jobs: { b: 'WORKING' }, layers: '1 CLOSED; 2 CLOSED' });
   assert.deepEqual(keysOf(checkFormat(r.root)), ['path-missing', 'path-missing']);
-  // a job that is complete, or another module's live job, does not make the entry pending
-  stateBranch(r, { jobs: { b: 'COMPLETE', a: 'WORKING' }, layers: '1 CLOSED; 2 STARTED' });
-  assert.deepEqual(keysOf(checkFormat(r.root)), ['path-missing', 'path-missing']);
+  // a job that has merged or been archived, or another module's live job, does not make the entry pending
+  for (const st of ['MERGED', 'ARCHIVED']) {
+    stateBranch(r, { jobs: { b: st, a: 'WORKING' }, layers: '1 CLOSED; 2 STARTED' });
+    assert.deepEqual(keysOf(checkFormat(r.root)), ['path-missing', 'path-missing'], st);
+  }
+  // the finding names the module's line in build/modules.json
+  assert.deepEqual(checkFormat(r.root).findings.map((f) => f.line), [1, 1]);   // a one-line map: line 1
+  const pretty = repo(base({ 'build/modules.json': JSON.stringify(JSON.parse(map), null, 1) }));
+  assert.deepEqual(checkFormat(pretty.root).findings.map((f) => [f.module, f.line]), [['b', 19], ['b', 19]]);
   // a closed epoch is no record
   stateBranch(r, { jobs: { b: 'WORKING' }, layers: '2 STARTED', closed: true });
   assert.deepEqual(keysOf(checkFormat(r.root)), ['path-missing', 'path-missing']);
@@ -649,12 +677,15 @@ test('coverage: the same id fails once the module\'s job record exists; an unmar
   assert.deepEqual(checkCoverage(unmarked.root, ['a']).findings.map((f) => f.id), ['R3', 'R4']);
 });
 
-test('coverage: neoProcess\'s plan title (`# Plan: … N1`, the id last) names the tranche, and its job branch `job/<m>` counts as started (JOB-LIFE §1)', () => {
+test('coverage: neoProcess\'s plan title (`# Plan: … N1`, the id last) names the tranche, and its job line on the state branch counts as started, never a local branch (JOB-LIFE §1; R10)', () => {
   const files = { ...AHEAD, 'build/plan/current.md': '# Plan: neoProcess dry run N1\n\n**Status** · OPEN.\n', 'build/requirements/a.md': REQ('- **R1** one\n- **R3** two *(not yet met: N1)*') };
   const ahead = repo(base(files));
   assert.deepEqual(checkCoverage(ahead.root, ['a']).findings, []);
   assert.equal(checkCoverage(ahead.root, ['a']).counts.ahead, 1);
-  ahead.g('branch', 'job/a');
+  ahead.g('branch', 'job/a');   // a local branch ref is the clone's, not the record's: it starts nothing
+  ahead.g('update-ref', 'refs/remotes/origin/job/a', 'HEAD');
+  assert.deepEqual(checkCoverage(ahead.root, ['a']).findings, []);
+  stateBranch(ahead, { jobs: { a: 'WORKING' } });
   assert.deepEqual(checkCoverage(ahead.root, ['a']).findings.map((f) => f.id), ['R3']);
   const other = repo(base({ ...files, 'build/plan/current.md': '# Plan: neoProcess dry run N2\n' }));
   assert.deepEqual(checkCoverage(other.root, ['a']).findings.map((f) => f.id), ['R3']);
@@ -694,6 +725,20 @@ test('R10: a check reads code and record files at a commit: never the working tr
   assert.deepEqual((await run(r.root, { write: false })).findings.map((f) => f.key).sort(), ['id-unnamed', 'later-import', 'unowned']);
   assert.deepEqual((await run(r.root, { ref: head, write: false })).findings, []);
   assert.deepEqual(snapshot(r.root, { ref: head }).read('stray.mjs'), null);
+  // the words check imports the product's op declarations from the commit, with the relative imports they reach: an
+  // uncommitted edit of them leaves its findings unchanged (K23)
+  const ops = repo(base({
+    'docs/words.json': JSON.stringify(WORD_TABLE), 'build/words.json': JSON.stringify({ table: 'docs/words.json', opDeclarations: 'src/a/ops.mjs' }),
+    'src/a/ops.mjs': "import { NAMES } from './names.mjs';\nexport const OPS = Object.fromEntries(NAMES.map((n) => [n, {}]));\n",
+    'src/a/names.mjs': "export const NAMES = ['alpha', 'beta', 'gamma', 'delta', 'epsilon'];\n",
+    'test/b/b.test.mjs': '// R1\nconst ALL = ["alpha", "beta", "gamma", "delta", "epsilon"];\n',
+  }));
+  const handlist = async () => (await checkWords(ops.root)).findings.map((f) => [f.key, f.why, f.file, f.line]);
+  assert.deepEqual(await handlist(), [['handlist', 'ops', 'test/b/b.test.mjs', 2]]);
+  ops.write({ 'src/a/names.mjs': 'export const NAMES = [];\n', 'src/a/ops.mjs': 'export const OPS = {};\n' });
+  assert.deepEqual(await handlist(), [['handlist', 'ops', 'test/b/b.test.mjs', 2]], 'the working tree is not read');
+  ops.g('add', '-A'); ops.g('commit', '-q', '-m', 'no ops');
+  assert.deepEqual(await handlist(), [], 'committed, the edit is read');
   // the network: a check never fetches; a branch moved on the remote is read only after the runner's refresh
   const remote = join(mkdtempSync(join(tmpdir(), 'remote-')), 'origin.git');
   execFileSync('git', ['clone', '-q', '--bare', r.root, remote]);

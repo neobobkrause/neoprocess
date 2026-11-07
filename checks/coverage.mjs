@@ -4,7 +4,7 @@
 // the cannot-fail check exists (INT 2, planned); until then every naming test counts.
 // Usage: node checks/coverage.mjs <product-root> [module ...]
 import { pathToFileURL } from 'node:url';
-import { snapshot, readModules, pathMatches, requirementIds, requirementFiles, finder, report } from './lib.mjs';
+import { snapshot, readModules, pathMatches, requirementIds, requirementFiles, finder, report, stateRecord } from './lib.mjs';
 
 // The tranche the plan names: `# Plan T<n>` (mechanics), or `# Plan: … N<n>` with the id last (neoProcess, JOB-LIFE §1); or null.
 function planTranche(S) {
@@ -12,11 +12,12 @@ function planTranche(S) {
   if (!title) return null;
   return title[1] ? title[2].match(/\b([A-Z]+\d+[a-z]?)\s*$/)?.[1] ?? null : title[2].split(/\s+/)[0];
 }
-// A module's job for the tranche has started: its record is in the commit, or its job branch exists (local or origin):
-// `job/<T>/<m>` under the mechanics, `job/<m>` under neoProcess (one job per module, JOB-LIFE §1).
-function jobStarted(S, T, m) {
+// A module's job for the tranche has started: its record is in the commit (`build/jobs/<T>/<m>.md`, the mechanics), or
+// its line is on the epoch's state branch, read at origin's state ref through record's repo (neoProcess, JOB-LIFE §1;
+// R10, K23): never a local branch ref, which differs from clone to clone.
+function jobStarted(S, T, m, record) {
   if (S.has(`build/jobs/${T}/${m}.md`)) return true;
-  return [`refs/heads/job/${T}/${m}`, `refs/remotes/origin/job/${T}/${m}`, `refs/heads/job/${m}`, `refs/remotes/origin/job/${m}`].some((r) => S.q(['rev-parse', '--verify', '-q', r]) !== null);
+  return !!record()?.job(m);
 }
 
 export function checkCoverage(root, only = []) {
@@ -25,6 +26,8 @@ export function checkCoverage(root, only = []) {
   const { findings, add } = finder('coverage');
   let modules = 0, ids = 0, covered = 0, ahead = 0;
   const T = planTranche(S);
+  let rec;
+  const record = () => (rec === undefined ? (rec = stateRecord(S)) : rec);
   for (const id of requirementFiles(S)) {
     if (only.length && !only.includes(id)) continue;
     const m = state.modules.find((x) => x.id === id);
@@ -34,7 +37,7 @@ export function checkCoverage(root, only = []) {
     const text = S.read(file) || '';
     const { live } = requirementIds(text);
     // P18: an id marked `*(not yet met: <T>)*` for this tranche, in a module whose job has not started, is written ahead: counted, never a failure.
-    const isAhead = (r) => T && !jobStarted(S, T, id) && text.split('\n').some((l) => l.includes(`**${r}**`) && !/\*\(retired/i.test(l) && [...l.matchAll(/\*\(not yet met:([^)]*)\)\*/g)].some((x) => x[1].split(/[\s,;]+/).includes(T)));
+    const isAhead = (r) => T && !jobStarted(S, T, id, record) && text.split('\n').some((l) => l.includes(`**${r}**`) && !/\*\(retired/i.test(l) && [...l.matchAll(/\*\(not yet met:([^)]*)\)\*/g)].some((x) => x[1].split(/[\s,;]+/).includes(T)));
     const named = new Set();
     for (const f of S.files) {
       if (!(m.tests || []).some((p) => pathMatches(p, f))) continue;

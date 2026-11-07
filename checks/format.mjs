@@ -14,14 +14,14 @@
 // `**L<n>`, `**U<n>` or `**B<n>`) and holds a date of EVIDENCE_FROM or later has `Evidence:` within the entry (up to the
 // next line that starts a report, or a heading). Earlier entries are exempt.
 // Also (N2-45; build/requirements/architecture.md R6): a module's `paths` or `tests` entry that names no committed file is
-// pending, not failed, while that module's job is live on the epoch's state branch (its line STARTING, WORKING, REOPENED
-// or a recorded wait) and its layer is not CLOSED in the state branch's plan; it fails once the layer has closed, or
+// pending, not failed, while that module's job is live on the epoch's state branch (its line in any state but MERGED or
+// ARCHIVED, K23) and its layer is not CLOSED in the state branch's plan; it fails once the layer has closed, or
 // with no live job. The state branch is read at the commit the local `origin/state/<epoch>` ref names (R10: never
 // fetched by the check; the runner refreshes it, checks/run.mjs).
 // The module order (layers, `uses`, `from`) is the architecture check's (R1, checks/architecture.mjs `modules`).
 // Usage: node checks/format.mjs <product-root>
 import { pathToFileURL } from 'node:url';
-import { snapshot, requirementFiles, finder, report } from './lib.mjs';
+import { snapshot, requirementFiles, finder, report, stateRecord, LIVE_JOB, moduleLines } from './lib.mjs';
 // R6: requirement files are read by the one parser (requirements R1) and Test lines judged by its measurement line (R4).
 import { parse, isMeasurement } from '../tools/requirements.mjs';
 
@@ -37,21 +37,6 @@ function conflictMarkers(S, add) {
       if (l.startsWith('<<<<<<< ') || l.replace(/\r$/, '') === '=======' || l.startsWith('>>>>>>> ')) add('conflict-marker', { file: f, line: i + 1 }, `${f}:${i + 1}: merge-conflict marker`);
     });
   }
-}
-
-// N2-45: the record of the epoch, read at the local ref of its state branch (record's layout: `epoch.md`, `plan.md`,
-// `jobs/<module>.md`). None, or more than one open, reads as no record: no entry is pending.
-const JOB_LINE = /^\*\*Status\*\* · ([A-Z][A-Z0-9-]* #\d+) · (session_[0-9A-Za-z]+|-) · (.+?)(?: · PR #(\d+))?$/m;
-export const LIVE_JOB = /^(?:STARTING|WORKING|REOPENED|WAITING: |BLOCKED: |NEEDS BOB: )/;
-export function stateRecord(S) {
-  const refs = (S.q(['for-each-ref', '--format=%(refname)', 'refs/remotes/origin/state/']) || '').split('\n').filter(Boolean);
-  const open = refs.filter((r) => { const e = S.q(['show', `${r}:epoch.md`]); return e !== null && !/^closed /m.test(e); });
-  if (open.length !== 1) return null;
-  const ref = open[0];
-  const layers = {};
-  for (const part of ((S.q(['show', `${ref}:plan.md`]) || '').match(/^\*\*Layers\*\* · (.*)$/m)?.[1] || '').split(';')) { const m = part.trim().match(/^(\d+) (\S+)/); if (m) layers[m[1]] = m[2]; }
-  const job = (m) => { const t = S.q(['show', `${ref}:jobs/${m}.md`]); const x = t && t.match(JOB_LINE); return x ? x[3] : null; };
-  return { ref, layers, job };
 }
 
 // The approvals revision (bio K1177, `next.md` P1; P15, P17): a ruling records Bob's approval of a refused act
@@ -274,16 +259,14 @@ export function checkFormat(root, { approvalsLastExempt = APPROVALS_LAST_EXEMPT,
   try { state = JSON.parse(S.read('build/modules.json')); }
   catch (e) { add('modules-unreadable', { file: 'build/modules.json' }, `build/modules.json: does not parse (${e.message})`); return done('stopped'); }
   const mods = Array.isArray(state.modules) ? state.modules : [];
-  if (!mods.length) add('no-modules', { file: 'build/modules.json' }, 'build/modules.json: no modules');
+  const idLines = moduleLines(S.read('build/modules.json'), mods);
   const seen = new Map();
   const claimed = new Map();
   let record;   // the epoch's state branch, read once and only when a map entry names no committed file (N2-45)
   mods.forEach((m, i) => {
     const at = `build/modules.json: ${m && m.id ? m.id : `module ${i}`}`;
-    const where = { module: m && typeof m.id === 'string' ? m.id : null, file: 'build/modules.json' };
-    if (!m || typeof m.id !== 'string' || !/^[a-z][a-z0-9-]*$/.test(m.id)) { add('id-invalid', where, `${at}: id missing or invalid`); return; }
-    if (seen.has(m.id)) add('id-twice', where, `${at}: id given twice`);
-    if (!Number.isInteger(m.layer) || m.layer < 1) add('layer-invalid', where, `${at}: layer is not a positive integer`);
+    const where = { module: m && typeof m.id === 'string' ? m.id : null, file: 'build/modules.json', line: idLines[i] };
+    if (!m || typeof m.id !== 'string' || !/^[a-z][a-z0-9-]*$/.test(m.id)) return;   // ids and layers are the architecture check's (R1)
     for (const k of ['paths', 'tests', 'uses']) if (!Array.isArray(m[k])) add('not-a-list', { ...where, field: k }, `${at}: ${k} is not a list`);
     for (const p of [...(m.paths || []), ...(m.tests || [])]) {
       if (claimed.has(p) && claimed.get(p) !== m.id) add('path-twice', { ...where, path: p, other: claimed.get(p) }, `${at}: path ${p} is also claimed by ${claimed.get(p)}`);
