@@ -88,10 +88,11 @@
 // Usage: node checks/fixtures.mjs <product-root> [module ...] [--list]
 //   --list prints every candidate (accepted ones too) as `<class> <user> <file>:<line> <status> <tag> <provider> imports:<modules> <excerpt>`
 //   for the reading workers, then the summary, and exits 0.
-import { readFileSync } from 'node:fs';
-import { join, posix } from 'node:path';
+// Every finding carries its key (the class), module (the user), file and line (R3; build/requirements/architecture.md);
+// the check reads the product at a commit (R10); its rules are as they stood at the module's N2 START (R9).
+import { posix } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { readModules, trackedFiles, ownerIndex, notProduct, report } from './lib.mjs';
+import { snapshot, readModules, ownerIndex, notProduct, report } from './lib.mjs';
 import { scan } from './words.mjs';
 
 const CODE_EXT = /\.(mjs|js|cjs|ts|tsx|jsx)$/;
@@ -342,13 +343,14 @@ function collectOps(text, module, opMods) {
 
 // ---- the check -----------------------------------------------------------------------------------------------------
 export function checkFixtures(root, only = []) {
-  const state = readModules(root);
+  const S = snapshot(root);
+  const state = readModules(S);
   const owner = ownerIndex(state);
   const outside = notProduct(state);
   const order = new Map(state.modules.map((m, i) => [m.id, i]));
-  const files = trackedFiles(root);
+  const files = S.files;
   const fileSet = new Set(files);
-  const read = (f) => { try { return readFileSync(join(root, f), 'utf8'); } catch { return ''; } };
+  const read = (f) => S.read(f) ?? '';
 
   // 1. product source: refusal codes and interface definitions by module
   const codeMods = new Map(); // code -> Set(module)
@@ -1092,7 +1094,9 @@ export function checkFixtures(root, only = []) {
 
   const fmtProv = (c) => (c.providers.length ? `${c.providers.join(',')} (${c.relation})` : '?');
   const failing = all.filter((c) => c.status === 'fail');
-  const failures = failing.map((c) => `${c.cls} ${c.user} ${c.file}:${c.line} ${c.tag ? `[${c.tag}] ` : ''}${c.text} -> ${fmtProv(c)}`).sort();
+  const findings = failing.map((c) => ({ check: 'fixtures', key: c.cls, module: c.user, file: c.file, line: c.line, tag: c.tag || null, providers: c.providers, finding: `${c.cls} ${c.user} ${c.file}:${c.line} ${c.tag ? `[${c.tag}] ` : ''}${c.text} -> ${fmtProv(c)}` }))
+    .sort((a, b) => (a.finding < b.finding ? -1 : a.finding > b.finding ? 1 : 0));
+  const failures = findings.map((f) => f.finding);
   const listing = all.map((c) => `${c.cls} ${c.user} ${c.file}:${c.line} ${c.status === 'accepted' ? `accepted(${c.contract})` : 'fail'} ${c.tag ? `[${c.tag}] ` : ''}-> ${fmtProv(c)} imports:${c.imports.join(',') || '-'} | ${c.text}`);
   const n = (cls) => failing.filter((c) => c.cls === cls).length;
   const byUser = {};
@@ -1101,7 +1105,7 @@ export function checkFixtures(root, only = []) {
   const invented = failing.filter((c) => c.invented).length;
   const accepted = all.filter((c) => c.status === 'accepted').length;
   const summary = `${parsed.length} test files read, ${state.modules.length} modules; answer ${n('answer')} (${invented} with an invented code, ${tagged('builder')} builder, ${tagged('op-table')} op-table), stub ${n('stub')}, code ${n('code')}, contract ${n('contract')}, accepted ${accepted}`;
-  return { failures, summary, listing, byUser, items: all, totals: { answer: n('answer'), stub: n('stub'), code: n('code'), contract: n('contract'), accepted, invented } };
+  return { findings, failures, summary, listing, byUser, items: all, totals: { answer: n('answer'), stub: n('stub'), code: n('code'), contract: n('contract'), accepted, invented } };
 }
 
 function relationOf(c, order) {

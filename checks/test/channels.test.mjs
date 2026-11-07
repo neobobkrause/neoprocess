@@ -9,7 +9,12 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { xwriter, xpost, xinbox, xdone, xcheck, parseRegistry, parseOutbox } from '../../tools/mail.mjs';
-import { checkChannels } from '../channels.mjs';
+import { checkChannels, refreshChannels } from '../channels.mjs';
+
+// The runner's order (checks/run.mjs): refresh the mail branches (fetch, and the forced-rewrite comparison against the tip
+// read before), then the check over the commits now held (R10). Findings by key and fields (R11).
+const channels = (dir) => { const fresh = refreshChannels(dir); const r = checkChannels(dir); return { ...r, findings: [...fresh.findings, ...r.findings] }; };
+const keyed = (dir) => channels(dir).findings.map((f) => [f.key, f.participant, f.entry ?? null]);
 
 const g = (dir, ...a) => execFileSync('git', ['-C', dir, ...a], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 const SB = 'session_01BBBBBBBBBBBBBBBBBBBBBBBB', SB2 = 'session_01CCCCCCCCCCCCCCCCCCCCCCCC', SU = 'session_01UUUUUUUUUUUUUUUUUUUUUUUU';
@@ -128,7 +133,7 @@ test('channels: post, read past the cursor, move it; each side writes only its o
   // A first post with no Writer line needs one.
   const w2 = world();
   assert.throws(() => xpost({ product: w2.bob, as: 'BOB', kind: 'NOTICE', body: 'x' }), /xwriter/);
-  assert.equal(checkChannels(w.bob).failures.length, 0);
+  assert.deepEqual(channels(w.bob).findings, []);
 });
 
 test('channels: xcheck lists, for each correspondent, what is unread on either side', () => {
@@ -160,64 +165,68 @@ test('channels: a successor rewrites only the Writer line, and its entries carry
   assert.equal(xpost({ product: w.bob, as: 'BOB', kind: 'HANDOFF', body: 'DEC-96 owed: requirements.' }).id, 'B3');
   const b3 = parseOutbox(remoteText(w, 'mail/BOB', 'mail/BOB.md')).entries.at(-1);
   assert.equal(b3.session, SB2);
-  assert.equal(checkChannels(w.bob).failures.length, 0);
+  assert.deepEqual(channels(w.bob).findings, []);
 });
 
 test('channels check: a clean history passes; no registry means nothing to check', () => {
   const w = exchanged();
   xdone({ product: w.bob, as: 'BOB', from: 'UX-DESIGN', through: 'U1' });
-  const r = checkChannels(w.bob);
-  assert.deepEqual(r.failures, []);
-  assert.match(r.summary, /2 participants, \d+ outbox commits read/);
+  const r = channels(w.bob);
+  assert.deepEqual(r.findings, []);
+  assert.equal(r.counts.participants, 2);
+  assert.ok(r.counts.commits > 0);
   const bare = mkdtempSync(join(tmpdir(), 'nochannel-'));
   g(bare, 'init', '-q');
-  assert.deepEqual(checkChannels(bare), { failures: [], summary: 'no build/channels.md: nothing to check' });
+  const none = checkChannels(bare);
+  assert.deepEqual([none.findings, none.counts, none.absent], [[], { participants: 0, commits: 0 }, []]);
   // A participant that has not joined yet is named, not failed.
   const w2 = world();
   xwriter({ product: w2.bob, as: 'BOB', session: SB });
-  assert.match(checkChannels(w2.bob).summary, /no mail branch yet: UX-DESIGN/);
+  const r2 = channels(w2.bob);
+  assert.deepEqual([r2.findings, r2.absent], [[], ['UX-DESIGN']]);
 });
 
 test('channels check: an entry rewritten after it was pushed fails', () => {
   const w = exchanged();
   handEdit(w, 'mail/BOB', 'mail/BOB.md', (t) => t.replace('is computed', 'is written'));
-  const f = checkChannels(w.ux).failures;
-  assert.equal(f.length, 1);
-  assert.match(f[0], /^BOB mail\/BOB [0-9a-f]{7}: changes entry B1$/);
+  const f = channels(w.ux).findings;
+  assert.deepEqual(f.map((x) => [x.key, x.participant, x.branch, x.file, x.entry]), [['entry-changed', 'BOB', 'mail/BOB', 'mail/BOB.md', 'B1']]);
+  assert.match(f[0].commit, /^[0-9a-f]{7}$/);
 });
 
 test('channels check: a removed entry fails', () => {
   const w = exchanged();
   handEdit(w, 'mail/BOB', 'mail/BOB.md', (t) => t.replace(/\n## B2 · [\s\S]*$/, '\n'));
-  const f = checkChannels(w.ux).failures;
-  assert.deepEqual(f.map((x) => x.replace(/^\S+ \S+ \w+: /, '')), ['removes entry B2']);
+  assert.deepEqual(keyed(w.ux), [['entry-removed', 'BOB', 'B2']]);
 });
 
 test('channels check: a skipped number, or another\'s letter, fails', () => {
   const w = exchanged();
   handEdit(w, 'mail/BOB', 'mail/BOB.md', (t) => `${t.trimEnd()}\n\n## B4 · NOTICE · 2026-10-01 · ${SB} · secondary\nskipped B3\n`);
-  assert.deepEqual(checkChannels(w.ux).failures.map((x) => x.replace(/^\S+ \S+ \w+: /, '')), ['entry numbers do not rise by one: B2 then B4']);
+  assert.deepEqual(keyed(w.ux), [['numbering', 'BOB', 'B4']]);
   const w2 = exchanged();
   handEdit(w2, 'mail/BOB', 'mail/BOB.md', (t) => `${t.trimEnd()}\n\n## U3 · NOTICE · 2026-10-01 · ${SB} · secondary\nwrong letter\n`);
-  assert.match(checkChannels(w2.ux).failures.join('\n'), /entry U3 does not carry the writer's letter B/);
+  assert.deepEqual(keyed(w2.ux), [['letter', 'BOB', 'U3']]);
 });
 
 test('channels check: a cursor moved backwards, or removed, fails', () => {
   const w = exchanged();
   xdone({ product: w.ux, as: 'UX-DESIGN', from: 'BOB', through: 'B2' });
   handEdit(w, 'mail/UX-DESIGN', 'mail/UX-DESIGN.md', (t) => t.replace('handled BOB B2', 'handled BOB B1'));
-  assert.deepEqual(checkChannels(w.bob).failures.map((x) => x.replace(/^\S+ \S+ \w+: /, '')), ['moves the cursor over BOB back from B2 to B1']);
+  assert.deepEqual(channels(w.bob).findings.map((f) => [f.key, f.participant, f.over, f.entry]), [['cursor-back', 'UX-DESIGN', 'BOB', 'B1']]);
   const w2 = exchanged();
   handEdit(w2, 'mail/UX-DESIGN', 'mail/UX-DESIGN.md', (t) => t.replace(/^\*\*Read\*\* · handled BOB B1\n/m, ''));
-  assert.deepEqual(checkChannels(w2.bob).failures.map((x) => x.replace(/^\S+ \S+ \w+: /, '')), ['removes the cursor over BOB (was B1)']);
+  assert.deepEqual(channels(w2.bob).findings.map((f) => [f.key, f.participant, f.over, f.entry]), [['cursor-removed', 'UX-DESIGN', 'BOB', 'B1']]);
 });
 
 test('channels check: a forced rewrite of a mail branch, invisible in the new history, fails against the tip read before', () => {
   const w = exchanged();
-  assert.deepEqual(checkChannels(w.ux).failures, []);           // the reader has seen the tip
+  assert.deepEqual(channels(w.ux).findings, []);           // the reader has seen the tip
   handEdit(w, 'mail/BOB', 'mail/BOB.md', (t) => `${t.trimEnd()}\n\n## B2 · NOTICE · 2026-10-01 · ${SB} · secondary\na different B2\n`, { force: true });  // B2 replaced by a forced push, scratch remote only
-  const f = checkChannels(w.ux).failures;
-  assert.ok(f.some((x) => /^BOB mail\/BOB: history rewritten: [0-9a-f]{7}, read before, is not in [0-9a-f]{7}$/.test(x)), f.join('\n'));
+  const f = channels(w.ux).findings;
+  assert.ok(f.some((x) => x.key === 'rewritten' && x.participant === 'BOB' && x.branch === 'mail/BOB'), JSON.stringify(f));
+  // the check alone reads the commits the clone holds and never fetches (R10): the rewrite is the refresh's finding
+  assert.ok(!checkChannels(w.ux).findings.some((x) => x.key === 'rewritten'));
 });
 
 // The same rewrite, met first by an x-command: the reader refuses it, names the branch and both tips, and keeps refusing
@@ -234,7 +243,7 @@ test('channels: xinbox first after a forced rewrite refuses, and so do later rea
   assert.throws(() => xinbox({ product: w.ux, as: 'UX-DESIGN', from: 'BOB' }), (e) => REWRITTEN.test(e.message) && e.message.includes(seen.slice(0, 7)) && e.message.includes(fresh.slice(0, 7)));
   assert.throws(() => xinbox({ product: w.ux, as: 'UX-DESIGN', from: 'BOB' }), REWRITTEN);
   assert.throws(() => xcheck({ product: w.ux, as: 'UX-DESIGN' }), REWRITTEN);
-  assert.ok(checkChannels(w.ux).failures.some((x) => REWRITTEN.test(x)));
+  assert.ok(channels(w.ux).findings.some((x) => x.key === 'rewritten' && x.branch === 'mail/BOB'));
 });
 
 test('channels: xcheck first after a forced rewrite refuses, and the check still fails', () => {
@@ -242,8 +251,8 @@ test('channels: xcheck first after a forced rewrite refuses, and the check still
   xcheck({ product: w.ux, as: 'UX-DESIGN' });
   rewriteB2(w);
   assert.throws(() => xcheck({ product: w.ux, as: 'UX-DESIGN' }), REWRITTEN);
-  assert.ok(checkChannels(w.ux).failures.some((x) => REWRITTEN.test(x)));
-  assert.ok(checkChannels(w.ux).failures.some((x) => REWRITTEN.test(x)));   // and on its second run
+  assert.ok(channels(w.ux).findings.some((x) => x.key === 'rewritten' && x.branch === 'mail/BOB'));
+  assert.ok(channels(w.ux).findings.some((x) => x.key === 'rewritten' && x.branch === 'mail/BOB'));   // and on its second run
 });
 
 test('channels: a plain fetch after a forced rewrite does not hide it from the reader', () => {
@@ -257,9 +266,9 @@ test('channels: a plain fetch after a forced rewrite does not hide it from the r
 test('channels: an ordinary append after a read passes the readers and the check', () => {
   const w = exchanged();
   xinbox({ product: w.ux, as: 'UX-DESIGN', from: 'BOB' });
-  assert.deepEqual(checkChannels(w.ux).failures, []);
+  assert.deepEqual(channels(w.ux).findings, []);
   xpost({ product: w.bob, as: 'BOB', kind: 'NOTICE', body: 'K905 (Bob): a later ruling.' });
   assert.deepEqual(xinbox({ product: w.ux, as: 'UX-DESIGN', from: 'BOB' }).entries.map((e) => e.id), ['B2', 'B3']);
   assert.deepEqual(xcheck({ product: w.ux, as: 'UX-DESIGN' })[0].unread, ['B2 DEFER', 'B3 NOTICE']);
-  assert.deepEqual(checkChannels(w.ux).failures, []);
+  assert.deepEqual(channels(w.ux).findings, []);
 });

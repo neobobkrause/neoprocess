@@ -13,35 +13,30 @@
 // `docs/development/investigation-design/HANDOFF.md`) every line that starts a dated report (`**P-<n>`, `**H<n>`, `**R<n>`,
 // `**L<n>`, `**U<n>` or `**B<n>`) and holds a date of EVIDENCE_FROM or later has `Evidence:` within the entry (up to the
 // next line that starts a report, or a heading). Earlier entries are exempt.
+// Also (N2-45; build/requirements/architecture.md R6): a module's `paths` or `tests` entry that names no committed file is
+// pending, not failed, while that module's job is live on the epoch's state branch (its line in any state but MERGED or
+// ARCHIVED, K23) and its layer is not CLOSED in the state branch's plan; it fails once the layer has closed, or
+// with no live job. The state branch is read at the commit the local `origin/state/<epoch>` ref names (R10: never
+// fetched by the check; the runner refreshes it, checks/run.mjs).
+// The module order (layers, `uses`, `from`) is the architecture check's (R1, checks/architecture.mjs `modules`).
 // Usage: node checks/format.mjs <product-root>
-import { readFileSync, existsSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
-import { requirementIds, requirementFiles, report, trackedFiles } from './lib.mjs';
+import { pathToFileURL } from 'node:url';
+import { snapshot, requirementFiles, finder, report, stateRecord, LIVE_JOB, moduleLines } from './lib.mjs';
+// R6: requirement files are read by the one parser (requirements R1) and Test lines judged by its measurement line (R4).
+import { parse, isMeasurement } from '../tools/requirements.mjs';
 
-const SECTIONS = ['## Public', '### Purpose', '### Provides', '## Private', '### Uses', '### Invariants', '### Satisfies'];
 
 // N440 (P3): an unresolved merge leaves conflict markers; a build-state file holding one is refused.
-function conflictMarkers(root) {
+function conflictMarkers(S, add) {
   const files = ['build/modules.json', 'build/layers.md', 'build/plan/current.md', 'build/plan/next.md', 'build/rulings.md',
-    ...requirementFiles(root).map((id) => `build/requirements/${id}.md`)];
-  const out = [];
+    ...requirementFiles(S).map((id) => `build/requirements/${id}.md`)];
   for (const f of files) {
-    if (!existsSync(join(root, f))) continue;
-    readFileSync(join(root, f), 'utf8').split('\n').forEach((l, i) => {
-      if (l.startsWith('<<<<<<< ') || l.replace(/\r$/, '') === '=======' || l.startsWith('>>>>>>> ')) out.push(`${f}:${i + 1}: merge-conflict marker`);
+    const text = S.read(f);
+    if (text === null) continue;
+    text.split('\n').forEach((l, i) => {
+      if (l.startsWith('<<<<<<< ') || l.replace(/\r$/, '') === '=======' || l.startsWith('>>>>>>> ')) add('conflict-marker', { file: f, line: i + 1 }, `${f}:${i + 1}: merge-conflict marker`);
     });
   }
-  return out;
-}
-
-// K1007 (P4, P15): an owned path names something that exists: a tracked file, a directory holding tracked files,
-// or a file or directory present in the checkout (a `tests` directory a job has yet to fill counts if it exists).
-function pathExists(root, tracked) {
-  return (p) => {
-    if (existsSync(join(root, p))) return true;
-    const dir = p.endsWith('/') ? p : `${p}/`;
-    return tracked.some((f) => f === p || f.startsWith(dir));
-  };
 }
 
 // The approvals revision (bio K1177, `next.md` P1; P15, P17): a ruling records Bob's approval of a refused act
@@ -57,16 +52,14 @@ const STANDING = /standing list: (?:added\s+`[^`]+`|not added\s*\(\s*[^\s)])/i;
 export function isApprovalRuling(line) {
   return /\bapproved\b/i.test(line) && (/§16(?!\d)/.test(line) || /\b(?:permission|auto-mode|safety) check\b/i.test(line));
 }
-function approvalRulings(root, lastExempt) {
-  const p = join(root, 'build/rulings.md');
-  if (!existsSync(p)) return [];
-  const out = [];
-  readFileSync(p, 'utf8').split('\n').forEach((line, i) => {
+function approvalRulings(S, add, lastExempt) {
+  const text = S.read('build/rulings.md');
+  if (text === null) return;
+  text.split('\n').forEach((line, i) => {
     const m = line.match(RULING);
     if (!m || Number(m[1]) <= lastExempt || !isApprovalRuling(line) || STANDING.test(line)) return;
-    out.push(`build/rulings.md:${i + 1}: K${m[1]} records Bob's approval of a refused act but states no standing-list decision ("standing list: added \`<rule>\`" or "standing list: not added (<why>)", §16)`);
+    add('approval-standing', { file: 'build/rulings.md', line: i + 1, ruling: `K${m[1]}` }, `build/rulings.md:${i + 1}: K${m[1]} records Bob's approval of a refused act but states no standing-list decision ("standing list: added \`<rule>\`" or "standing list: not added (<why>)", §16)`);
   });
-  return out;
 }
 
 // N656 (bio K1763 (5), K1762 (2); P15, P17; a proposed revision until certified, rulebook GOV 5): every statement of a limit on
@@ -83,42 +76,36 @@ export const TERMS_FIRST_RULING = 1764;
 // and the text after it begins with one of NEXT_REASONS. No other plan file is judged.
 export const NEXT_REASONS = /^(?:Bob's|a deployment|a measurement|outside the product)/i;
 const ENTRY = /^- ((?:N|T\d+[a-z]?-)\d+|[A-Z]+-\d+) · /;
-function nextReasons(root) {
-  const p = join(root, 'build/plan/next.md');
-  if (!existsSync(p)) return [];
-  const out = [];
-  readFileSync(p, 'utf8').split('\n').forEach((line, i) => {
+function nextReasons(S, add) {
+  const text = S.read('build/plan/next.md');
+  if (text === null) return;
+  text.split('\n').forEach((line, i) => {
     const m = line.match(ENTRY);
     if (!m) return;
     const at = line.indexOf('hard reason: ');
     const reason = at < 0 ? null : line.slice(at + 'hard reason: '.length).replace(/^[*_\s]+/, '');
     if (reason !== null && NEXT_REASONS.test(reason)) return;
-    out.push(`build/plan/next.md:${i + 1}: ${m[1]} names no P19 hard reason (Bob's, a deployment, a measurement, outside the product)${reason ? ` : "${reason.slice(0, 60)}"` : ''}`);
+    add('next-reason', { file: 'build/plan/next.md', line: i + 1, entry: m[1] }, `build/plan/next.md:${i + 1}: ${m[1]} names no P19 hard reason (Bob's, a deployment, a measurement, outside the product)${reason ? ` : "${reason.slice(0, 60)}"` : ''}`);
   });
-  return out;
 }
 // P19, rulebook PLN 1 (bio K5015): a line that defers work, outside `next.md`, cites `next.md`.
 export const DEFERRAL = /\b(?:next fix round|next round|a later round|later tranche|deferred to)\b/i;
 export function deferralFiles(root) {
+  const S = snapshot(root);
   const files = ['build/plan/current.md', 'build/handoff.md'];
-  const cur = join(root, 'build/plan/current.md');
-  if (existsSync(cur)) {
-    for (const m of readFileSync(cur, 'utf8').matchAll(/build\/plan\/(fix-round-[A-Za-z0-9._-]*?\.md)/g)) {
-      const f = `build/plan/${m[1]}`;
-      if (!files.includes(f) && existsSync(join(root, f))) files.push(f);
-    }
+  for (const m of (S.read('build/plan/current.md') || '').matchAll(/build\/plan\/(fix-round-[A-Za-z0-9._-]*?\.md)/g)) {
+    const f = `build/plan/${m[1]}`;
+    if (!files.includes(f) && S.has(f)) files.push(f);
   }
-  return files.filter((f) => existsSync(join(root, f)));
+  return files.filter((f) => S.read(f) !== null);
 }
-function deferrals(root) {
-  const out = [];
-  for (const f of deferralFiles(root)) {
-    readFileSync(join(root, f), 'utf8').split('\n').forEach((line, i) => {
+function deferrals(S, add) {
+  for (const f of deferralFiles(S)) {
+    S.read(f).split('\n').forEach((line, i) => {
       const m = line.match(DEFERRAL);
-      if (m && !/next\.md/.test(line)) out.push(`${f}:${i + 1}: defers work ("${m[0]}") without citing next.md; work that waits is an entry of next.md only, with its P19 reason (P19)`);
+      if (m && !/next\.md/.test(line)) add('deferral', { file: f, line: i + 1 }, `${f}:${i + 1}: defers work ("${m[0]}") without citing next.md; work that waits is an entry of next.md only, with its P19 reason (P19)`);
     });
   }
-  return out;
 }
 // A limit: a word or phrase that restricts; an Anthropic subject must also stand near it (statesLimit).
 export const TERMS_LIMIT = new RegExp([
@@ -157,9 +144,9 @@ export function statesLimit(s) {
 }
 
 export function registerPath(root) {
-  const manifest = join(root, 'build/manifest.md');
-  if (existsSync(manifest)) {
-    for (const line of readFileSync(manifest, 'utf8').split('\n')) {
+  const manifest = snapshot(root).read('build/manifest.md');
+  if (manifest !== null) {
+    for (const line of manifest.split('\n')) {
       if (!/Anthropic/.test(line)) continue;
       const m = line.match(/`(build\/[^`\s]+\.md)`/);
       if (m) return m[1];
@@ -179,12 +166,11 @@ export function registerIds(text) {
   return ids;
 }
 
-function termsScope(root, register) {
+function termsScope(S, register) {
   const files = ['build/manifest.md', 'build/plan/current.md', 'build/plan/next.md'];
-  const md = (dir, keep = () => true) => (existsSync(join(root, dir)) ? readdirSync(join(root, dir), { withFileTypes: true })
-    .filter((e) => e.isFile() && e.name.endsWith('.md') && keep(e.name)).map((e) => `${dir}/${e.name}`).sort() : []);
+  const md = (dir, keep = () => true) => S.list(dir).filter((f) => !f.slice(dir.length + 1).includes('/') && f.endsWith('.md') && keep(f.slice(dir.length + 1))).sort();
   files.push(...md('build/requirements'), ...md('build/plan', (n) => n.startsWith('draft-')), ...md('docs/architecture'));
-  return files.filter((f) => f !== register && existsSync(join(root, f)));
+  return files.filter((f) => f !== register && S.read(f) !== null);
 }
 
 // A line's sentences: split after . ! ? or ; before a new clause, and at the ` · ` field separator.
@@ -193,15 +179,16 @@ function sentences(line) {
 }
 
 export function termsClaims(root) {
-  const register = registerPath(root);
-  if (!existsSync(join(root, register))) return { failures: [], skipped: true };
-  const ids = registerIds(readFileSync(join(root, register), 'utf8'));
-  const failures = [];
-  const files = [...termsScope(root, register), ...(existsSync(join(root, 'build/rulings.md')) && register !== 'build/rulings.md' ? ['build/rulings.md'] : [])];
+  const S = snapshot(root);
+  const register = registerPath(S);
+  const { findings, add } = finder('format');
+  if (S.read(register) === null) return { findings, failures: [], skipped: true };
+  const ids = registerIds(S.read(register));
+  const files = [...termsScope(S, register), ...(S.read('build/rulings.md') !== null && register !== 'build/rulings.md' ? ['build/rulings.md'] : [])];
   let lines = 0;
   for (const f of files) {
     let fence = false;
-    readFileSync(join(root, f), 'utf8').split('\n').forEach((raw, i) => {
+    S.read(f).split('\n').forEach((raw, i) => {
       if (/^\s*(```|~~~)/.test(raw)) { fence = !fence; return; }
       if (fence) return;
       if (f === 'build/manifest.md' && raw.includes(`\`${register}\``)) return; // the row that names the register describes it
@@ -214,143 +201,148 @@ export function termsClaims(root) {
         const at = statesLimit(s);
         const from = s.length <= 120 || at < 60 ? 0 : Math.min(at - 60, s.length - 120);
         const excerpt = `${from ? '…' : ''}${s.slice(from).replace(/\s+/g, ' ').trim().replace(/^[-*#>\s|]+/, '').slice(0, 120)}`;
-        if (unknown.length) { failures.push(`${f}:${i + 1}: uncited limit on Anthropic's terms ("${excerpt}"): ${[...new Set(unknown)].join(', ')} not in ${register}`); continue; }
+        if (unknown.length) { add('terms-unknown-id', { file: f, line: i + 1, ids: [...new Set(unknown)] }, `${f}:${i + 1}: uncited limit on Anthropic's terms ("${excerpt}"): ${[...new Set(unknown)].join(', ')} not in ${register}`); continue; }
         if (at < 0) continue;
         if (named.length) continue;
         if (/\bK\d+\b/.test(s) && /\bBob(?:'s|’s)?\b/.test(s)) continue;
-        failures.push(`${f}:${i + 1}: uncited limit on Anthropic's terms ("${excerpt}")`);
+        add('terms-uncited', { file: f, line: i + 1 }, `${f}:${i + 1}: uncited limit on Anthropic's terms ("${excerpt}")`);
       }
     });
   }
-  return { failures, skipped: false, register, lines };
+  return { findings, failures: findings.map((x) => x.finding), skipped: false, register, lines };
 }
 
 // Each ruling id once (P15: a ruling is cited by its id). `proc ruling` and `proc merge` number from the file as it
 // stands; an id written by hand could repeat one (lane R17), and this finds it.
-function rulingIds(root, exempt = RULING_DUPS_EXEMPT) {
-  let text; try { text = readFileSync(join(root, 'build/rulings.md'), 'utf8'); } catch { return []; }
-  const first = new Map(), failures = [];
+function rulingIds(S, add, exempt = RULING_DUPS_EXEMPT) {
+  const text = S.read('build/rulings.md');
+  if (text === null) return;
+  const first = new Map();
   text.split('\n').forEach((l, i) => {
     const k = l.match(RULING)?.[1]; if (!k) return;
-    if (first.has(k) && !exempt.includes(`K${k}`)) failures.push(`build/rulings.md:${i + 1}: K${k} given twice (first at line ${first.get(k)}); number rulings by \`proc ruling\``);
+    if (first.has(k) && !exempt.includes(`K${k}`)) add('ruling-twice', { file: 'build/rulings.md', line: i + 1, ruling: `K${k}` }, `build/rulings.md:${i + 1}: K${k} given twice (first at line ${first.get(k)}); number rulings by \`proc ruling\``);
     if (!first.has(k)) first.set(k, i + 1);
   });
-  return failures;
 }
 
 // P20: a lane's dated report carries its evidence.
 export const EVIDENCE_FROM = '2026-10-29'; // the day after P20's adoption (bio K5763): earlier entries predate it
 const REPORT_START = /^\*\*(?:P-|H|R|L|U|B)\d+/;
 export function handoffFiles(root) {
-  const dir = join(root, 'build/plan/beta');
-  const lanes = existsSync(dir) ? readdirSync(dir, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => `build/plan/beta/${e.name}/HANDOFF.md`).sort() : [];
-  return [...lanes, 'docs/development/investigation-design/HANDOFF.md'].filter((f) => existsSync(join(root, f)));
+  const S = snapshot(root);
+  const lanes = [...new Set(S.list('build/plan/beta').map((f) => f.split('/')[3]).filter((d, _, a) => S.files.some((f) => f.startsWith(`build/plan/beta/${d}/`))))].map((d) => `build/plan/beta/${d}/HANDOFF.md`).sort();
+  return [...lanes, 'docs/development/investigation-design/HANDOFF.md'].filter((f) => S.read(f) !== null);
 }
-function laneEvidence(root, from = EVIDENCE_FROM) {
-  const out = [];
-  for (const f of handoffFiles(root)) {
-    const lines = readFileSync(join(root, f), 'utf8').split('\n');
+function laneEvidence(S, add, from = EVIDENCE_FROM) {
+  for (const f of handoffFiles(S)) {
+    const lines = S.read(f).split('\n');
     lines.forEach((line, i) => {
       if (!REPORT_START.test(line) || !(line.match(/\b\d{4}-\d{2}-\d{2}\b/g) || []).some((d) => d >= from)) return;
       let end = i + 1;
       while (end < lines.length && !REPORT_START.test(lines[end]) && !/^#/.test(lines[end])) end++;
-      if (!lines.slice(i, end).some((l) => l.includes('Evidence:'))) out.push(`${f}:${i + 1}: the report "${line.slice(0, 40)}" dated ${from} or later has no "Evidence:" in its entry (a command run with its result, a file:line, or a test run with its totals; P20)`);
+      if (!lines.slice(i, end).some((l) => l.includes('Evidence:'))) add('lane-evidence', { file: f, line: i + 1 }, `${f}:${i + 1}: the report "${line.slice(0, 40)}" dated ${from} or later has no "Evidence:" in its entry (a command run with its result, a file:line, or a test run with its totals; P20)`);
     });
   }
-  return out;
 }
 
 // N656 (K1763) is opt-in until certified by its dry run (P3; dryrun/CERTIFICATION.md TC1): PROC_TERMS_CHECK=1.
 export function checkFormat(root, { approvalsLastExempt = APPROVALS_LAST_EXEMPT, terms: withTerms = process.env.PROC_TERMS_CHECK === '1' } = {}) {
-  const terms = withTerms ? termsClaims(root) : { failures: [], skipped: true };
-  const failures = [...conflictMarkers(root), ...rulingIds(root), ...approvalRulings(root, approvalsLastExempt), ...nextReasons(root), ...deferrals(root), ...laneEvidence(root), ...terms.failures];
-  let tracked = [];
-  try { tracked = trackedFiles(root); } catch { /* not a git repository: the checkout alone is read */ }
-  const exists = pathExists(root, tracked);
+  const S = snapshot(root);
+  const { findings, add } = finder('format');
+  const pending = [];
+  let terms = { findings: [], skipped: true };
+  const done = (summary) => ({ findings, failures: findings.map((f) => f.finding), pending, register: terms.skipped ? null : terms.register, summary });
+  conflictMarkers(S, add); rulingIds(S, add); approvalRulings(S, add, approvalsLastExempt); nextReasons(S, add); deferrals(S, add); laneEvidence(S, add);
+  if (withTerms) terms = termsClaims(S);
+  findings.push(...terms.findings);
   let state;
-  try { state = JSON.parse(readFileSync(join(root, 'build/modules.json'), 'utf8')); }
-  catch (e) { return { failures: [...failures, `build/modules.json: does not parse (${e.message})`], summary: 'stopped' }; }
+  try { state = JSON.parse(S.read('build/modules.json')); }
+  catch (e) { add('modules-unreadable', { file: 'build/modules.json' }, `build/modules.json: does not parse (${e.message})`); return done('stopped'); }
   const mods = Array.isArray(state.modules) ? state.modules : [];
-  if (!mods.length) failures.push('build/modules.json: no modules');
+  const idLines = moduleLines(S.read('build/modules.json'), mods);
   const seen = new Map();
   const claimed = new Map();
-  let lastLayer = 0;
+  let record;   // the epoch's state branch, read once and only when a map entry names no committed file (N2-45)
   mods.forEach((m, i) => {
     const at = `build/modules.json: ${m && m.id ? m.id : `module ${i}`}`;
-    if (!m || typeof m.id !== 'string' || !/^[a-z][a-z0-9-]*$/.test(m.id)) { failures.push(`${at}: id missing or invalid`); return; }
-    if (seen.has(m.id)) failures.push(`${at}: id given twice`);
-    if (!Number.isInteger(m.layer) || m.layer < 1) failures.push(`${at}: layer is not a positive integer`);
-    else if (m.layer < lastLayer) failures.push(`${at}: layer ${m.layer} after layer ${lastLayer}; a layer's modules are adjacent and in order (P4)`);
-    else lastLayer = m.layer;
-    for (const k of ['paths', 'tests', 'uses']) if (!Array.isArray(m[k])) failures.push(`${at}: ${k} is not a list`);
+    const where = { module: m && typeof m.id === 'string' ? m.id : null, file: 'build/modules.json', line: idLines[i] };
+    if (!m || typeof m.id !== 'string' || !/^[a-z][a-z0-9-]*$/.test(m.id)) return;   // ids and layers are the architecture check's (R1)
+    for (const k of ['paths', 'tests', 'uses']) if (!Array.isArray(m[k])) add('not-a-list', { ...where, field: k }, `${at}: ${k} is not a list`);
     for (const p of [...(m.paths || []), ...(m.tests || [])]) {
-      if (claimed.has(p) && claimed.get(p) !== m.id) failures.push(`${at}: path ${p} is also claimed by ${claimed.get(p)}`);
+      if (claimed.has(p) && claimed.get(p) !== m.id) add('path-twice', { ...where, path: p, other: claimed.get(p) }, `${at}: path ${p} is also claimed by ${claimed.get(p)}`);
       claimed.set(p, m.id);
     }
     for (const k of ['paths', 'tests']) for (const p of Array.isArray(m[k]) ? m[k] : []) {
-      if (!exists(p)) failures.push(`${at}: ${k} entry ${p} names no file or directory in the product`);
+      if (S.has(p)) continue;
+      if (record === undefined) record = stateRecord(S);
+      const job = record ? record.job(m.id) : null;
+      if (job && LIVE_JOB.test(job) && record.layers[m.layer] !== 'CLOSED') { pending.push({ check: 'format', key: 'path-pending', ...where, field: k, path: p, job, finding: `${at}: ${k} entry ${p} names no file yet; pending while ${m.id}'s job reads ${job.split(':')[0]}` }); continue; }
+      add('path-missing', { ...where, field: k, path: p }, `${at}: ${k} entry ${p} names no file or directory in the product`);
     }
-    for (const u of m.uses || []) {
-      if (u === '*earlier') { if (!m.legacy) failures.push(`${at}: only a legacy module may use "*earlier"`); continue; }
-      if (!seen.has(u)) failures.push(`${at}: uses ${u}, which is ${mods.some((x) => x.id === u) ? 'not earlier in the order' : 'no module'}`);
-    }
-    for (const f of [].concat(m.from ?? [])) if (!mods.some((x) => x.id === f && x.legacy)) failures.push(`${at}: from ${f}, which is no legacy module`);
     seen.set(m.id, m);
   });
-  for (const p of state.not_product || []) if (claimed.has(p)) failures.push(`build/modules.json: ${p} is both not_product and owned by ${claimed.get(p)}`);
+  for (const p of state.not_product || []) if (claimed.has(p)) add('not-product-owned', { module: claimed.get(p), file: 'build/modules.json', path: p }, `build/modules.json: ${p} is both not_product and owned by ${claimed.get(p)}`);
 
   // layers.md: each layer row lists exactly that layer's modules, in order.
-  const layersPath = join(root, 'build/layers.md');
-  if (existsSync(layersPath)) {
-    const rows = readFileSync(layersPath, 'utf8').split('\n').filter((l) => /^\|\s*\d+\s*\|/.test(l));
+  const layersText = S.read('build/layers.md');
+  if (layersText !== null) {
+    const lines = layersText.split('\n');
     const layers = new Set(mods.map((m) => m.layer));
-    for (const row of rows) {
+    lines.forEach((row, i) => {
+      if (!/^\|\s*\d+\s*\|/.test(row)) return;
       const cells = row.split('|').slice(1, -1).map((c) => c.trim());
       const n = Number(cells[0]);
-      if (!layers.has(n)) continue; // a table of another kind (the legacy modules' line counts has no layer number first)
-      const listed = cells[cells.length - 1].split(',').map((s) => s.trim()).filter(Boolean);
+      if (!layers.has(n)) return; // a table of another kind (the legacy modules' line counts has no layer number first)
+      const listed = cells[cells.length - 1].split(',').map((x) => x.trim()).filter(Boolean);
       const actual = mods.filter((m) => m.layer === n).map((m) => m.id);
-      if (listed.join(',') !== actual.join(',')) failures.push(`build/layers.md: layer ${n} lists ${listed.join(', ')}, but modules.json has ${actual.join(', ')}`);
+      if (listed.join(',') !== actual.join(',')) add('layer-row', { file: 'build/layers.md', line: i + 1, layer: n }, `build/layers.md: layer ${n} lists ${listed.join(', ')}, but modules.json has ${actual.join(', ')}`);
       layers.delete(n);
-    }
-    for (const n of layers) failures.push(`build/layers.md: layer ${n} has no row`);
-  } else failures.push('build/layers.md: missing');
+    });
+    for (const n of layers) add('layer-no-row', { file: 'build/layers.md', layer: n }, `build/layers.md: layer ${n} has no row`);
+  } else add('layers-missing', { file: 'build/layers.md' }, 'build/layers.md: missing');
 
-  // Requirements files: one per module, the sections of rulebook REQ 3, each id once.
+  // Requirements files: one per module, each parsing by requirements.parse with no finding (its sections in order, every
+  // statement under an id, each id once), and no Test line that requirements.isMeasurement names (R6; REQ-3).
+  const manifest = S.read('build/manifest.md') || '';
   let reqFiles = 0;
-  for (const id of requirementFiles(root)) {
+  for (const id of requirementFiles(S)) {
     reqFiles++;
     const at = `build/requirements/${id}.md`;
-    if (!seen.has(id)) failures.push(`${at}: names no module of build/modules.json`);
-    const text = readFileSync(join(root, at), 'utf8');
-    let from = 0;
-    for (const s of SECTIONS) {
-      const i = text.split('\n').findIndex((l, k) => k >= from && l.trim() === s);
-      if (i < 0) failures.push(`${at}: section "${s}" missing or out of order`); else from = i + 1;
+    const where = { module: id, file: at };
+    if (!seen.has(id)) add('req-no-module', where, `${at}: names no module of build/modules.json`);
+    const text = S.read(at) || '';
+    const lines = text.split('\n');
+    for (const p of parse(text).findings) {
+      const sec = p.match(/^section "([^"]+)"/), dup = p.match(/^ids given twice: (.*)$/);
+      if (sec) add('req-section', { ...where, section: sec[1] }, `${at}: section "${sec[1]}" missing or out of order`);
+      else if (dup) { const ids = dup[1].split(' '); add('req-ids-twice', { ...where, line: lines.findIndex((l) => l.includes(`**${ids[0]}**`)) + 1 || null, ids }, `${at}: ids given twice: ${ids.join(' ')}`); }
+      else add('req-statement', where, `${at}: ${p}`);
     }
-    const { all } = requirementIds(text);
-    const dup = all.filter((r, i) => all.indexOf(r) !== i);
-    if (dup.length) failures.push(`${at}: ids given twice: ${[...new Set(dup)].join(' ')}`);
+    lines.forEach((l, i) => {
+      const t = l.match(/\bTest:\s*(.*)$/);
+      if (t && isMeasurement(t[1], manifest)) add('test-measurement', { ...where, line: i + 1 }, `${at}:${i + 1}: a Test line names a measurement (a fixture above the product's size, or a figure on a deployed copy): it belongs in the plan under its own id`);
+    });
   }
 
   // The plan: an entry id once per module. An entry shared by two modules (a provided service and its
   // user) is listed under each; a module heading is a line that is only a bold module id, or several.
   for (const plan of ['build/plan/current.md', 'build/plan/next.md']) {
-    if (!existsSync(join(root, plan))) continue;
+    const text = S.read(plan);
+    if (text === null) continue;
     let under = '';
     const keys = [];
-    for (const line of readFileSync(join(root, plan), 'utf8').split('\n')) {
+    for (const line of text.split('\n')) {
       if (/^\*\*[a-z][a-z0-9-]*\*\*(,\s*\*\*[a-z][a-z0-9-]*\*\*)*(\s*\(.*\))?\s*$/.test(line) || /^#/.test(line)) { under = line; continue; }
       const m = line.match(/^- ((?:N|T\d+[a-z]?-)\d+|[A-Z]+-\d+) · /);
       if (m) keys.push(`${m[1]}\u0000${under}`);
     }
     const dup = keys.filter((k, i) => keys.indexOf(k) !== i).map((k) => k.split('\u0000')[0]);
-    if (dup.length) failures.push(`${plan}: entry ids given twice under one module: ${[...new Set(dup)].join(' ')}`);
+    if (dup.length) add('entry-twice', { file: plan, entries: [...new Set(dup)] }, `${plan}: entry ids given twice under one module: ${[...new Set(dup)].join(' ')}`);
   }
-  return { failures, summary: `${mods.length} modules, ${reqFiles} requirements files${terms.skipped ? '' : `, terms register ${terms.register}`}` };
+  return done(`${mods.length} modules, ${reqFiles} requirements files${pending.length ? `, ${pending.length} map entr${pending.length === 1 ? 'y' : 'ies'} pending a live job` : ''}${terms.skipped ? '' : `, terms register ${terms.register}`}`);
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   const { failures, summary } = checkFormat(process.argv[2] || '.');
   process.exitCode = report('format', failures, summary);
 }
