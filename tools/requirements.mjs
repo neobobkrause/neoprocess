@@ -4,11 +4,14 @@
 // a job's reading set against a budget drawn from the model's window (R5, R6). Pure (R7): no git write, no network, no
 // session; the only read is `R.read`, the product checkout's file read that `record.repo` answers.
 
+import { posix } from 'node:path';
+
 // ---- R1: parse ----
 
 // The sections in their order (REQ 3); Suggestions is optional and binds nothing.
 export const SECTIONS = ['## Public', '### Purpose', '### Provides', '## Private', '### Uses', '### Invariants', '### Satisfies'];
-const ID = /\*\*(R\d+)\*\*/g;
+// A statement's own id leads its line (`- **R<n>**`); an id cited in bold elsewhere on a line is not that line's.
+const LEAD = /^\s*-\s+\*\*(R\d+)\*\*/;
 // A retired id reads `*(retired …)*` or `*(moved to <module> R<n>)*`, and is never reused (R3).
 const RETIRED = /\*\((?:retired|moved to [\w-]+ R\d+)/i;
 const HEADER = /^\*\*([A-Za-z_$][\w$]*)\s*\(/;
@@ -22,7 +25,27 @@ function section(text, heading) {
   return out.join('\n');
 }
 const items = (body) => (body ?? '').split('\n').filter((l) => /^\s*- /.test(l)).map((l) => l.replace(/^\s*- /, '').trim());
-const idsOf = (line) => [...line.matchAll(ID)].map((m) => m[1]);
+const leadOf = (line) => line.match(LEAD)?.[1] ?? null;
+// The service names of a header line: every bold name, as `**a(…)**`, `**a(…), b(…)**`, `**a(…)** · **b(…)**`
+// or `**a(…) / b / c(…)**`; a name inside brackets (a parameter, a returned field) is none.
+export function headerNames(line) {
+  let flat = line, prev;
+  do { prev = flat; flat = flat.replace(/\([^()]*\)|\{[^{}]*\}|\[[^[\]]*\]/g, '()'); } while (flat !== prev);
+  return [...new Set([...flat.matchAll(/(?:\*\*|\/\s*)([A-Za-z_$][\w$]*)|,\s*([A-Za-z_$][\w$]*)\s*\(/g)].map((m) => m[1] ?? m[2]))];
+}
+// The provided services by position: each header line and every line under it to the next header.
+function provided(text) {
+  const prov = (text.split(/^## Private/m)[0].split(/^### Provides\b/m)[1] ?? '').split(/^#{2,3} /m)[0];
+  const blocks = [];
+  let cur = null;
+  for (const line of prov.split('\n')) {
+    if (HEADER.test(line)) { cur = { names: headerNames(line), interface: line, text: `${line}\n`, ids: [] }; blocks.push(cur); continue; }
+    if (!cur) continue;
+    cur.text += `${line}\n`;
+    const id = leadOf(line); if (id) cur.ids.push(id);
+  }
+  return blocks;
+}
 
 // The Uses section as a map from a used module to the services named for it: `module.service`, or a line
 // "- `module`: `a`, `b` (…)" (several modules may share a line).
@@ -45,8 +68,8 @@ export function parse(text) {
     if (i < 0) findings.push(`section "${s}" missing or out of order`); else from = i + 1;
   }
   const purpose = (section(text, '### Purpose') ?? '').trim();
-  const provides = serviceBlocks(text).blocks.map((b) => ({ names: b.names, interface: b.text.split('\n')[0], text: b.text, ids: idsOf(b.text) }));
-  const invariants = items(section(text, '### Invariants')).map((s) => ({ ids: idsOf(s), text: s }));
+  const provides = provided(text);
+  const invariants = items(section(text, '### Invariants')).map((s) => ({ ids: [leadOf(`- ${s}`)].filter(Boolean), text: s }));
   const satisfies = items(section(text, '### Satisfies')), suggestions = items(section(text, '### Suggestions'));
   const uses = [...usesOf(text)].map(([module, services]) => ({ module, services }));
   // Every statement is under a permanent id: a list item in Provides (below a service's header) or in Invariants.
@@ -54,11 +77,11 @@ export function parse(text) {
   let under = false;
   for (const l of prov.split('\n')) {
     if (HEADER.test(l)) { under = true; continue; }
-    if (/^- /.test(l) && !idsOf(l).length) findings.push(`a statement in Provides${under ? '' : ' (outside any service)'} has no id: ${l.replace(/^- /, '').trim().slice(0, 80)}`);
+    if (/^- /.test(l) && !leadOf(l)) findings.push(`a statement in Provides${under ? '' : ' (outside any service)'} has no id: ${l.replace(/^- /, '').trim().slice(0, 80)}`);
   }
   for (const s of invariants) if (!s.ids.length) findings.push(`a statement in Invariants has no id: ${s.text.slice(0, 80)}`);
   const all = [], live = [], retired = [];
-  for (const l of lines) for (const id of idsOf(l)) { all.push(id); (RETIRED.test(l) ? retired : live).push(id); }
+  for (const l of lines) { const id = leadOf(l); if (id) { all.push(id); (RETIRED.test(l) ? retired : live).push(id); } }
   const dup = [...new Set(all.filter((r, i) => all.indexOf(r) !== i))];
   if (dup.length) findings.push(`ids given twice: ${dup.join(' ')}`);
   return { purpose, provides, uses, invariants, satisfies, suggestions, ids: { all, live, retired }, findings };
@@ -77,7 +100,7 @@ export function serviceBlocks(text) {
   const blocks = [];
   let cur = null, last = null, keep = true, run = true;
   for (const line of prov.split('\n')) {
-    if (HEADER.test(line)) { cur = { names: [...line.matchAll(/(?:^\*\*|,\s*)([A-Za-z_$][\w$]*)\s*\(/g)].map((x) => x[1]), text: `${line}\n` }; blocks.push(cur); last = null; keep = true; run = true; continue; }
+    if (HEADER.test(line)) { cur = { names: headerNames(line), text: `${line}\n` }; blocks.push(cur); last = null; keep = true; run = true; continue; }
     if (!cur) continue;
     const r = line.match(/^\s*- \*\*R(\d+)\*\*/);
     if (r) {
@@ -99,19 +122,19 @@ const tranchesOf = (list) => list.split(/[\s,;]+/).filter(Boolean);
 export function marks(text) {
   const out = [];
   for (const l of text.split('\n')) {
-    const ids = idsOf(l);
-    if (!ids.length) continue;
-    if (RETIRED.test(l)) { for (const id of ids) out.push({ id, retired: true, tranches: [] }); continue; }
+    const id = leadOf(l);
+    if (!id) continue;
+    if (RETIRED.test(l)) { out.push({ id, retired: true, tranches: [] }); continue; }
     const tr = [...l.matchAll(MARK)].flatMap((m) => tranchesOf(m[1]).filter((x) => /^[A-Z]+\d+[a-z]?$/.test(x)));
-    if (tr.length) for (const id of ids) out.push({ id, tranches: tr });
+    if (tr.length) out.push({ id, tranches: tr });
   }
   return out;
 }
-// Strikes tranche T from the marks on the lines of the ids named (the whole mark when T was its only tranche); nothing
-// else in the text changes.
+// Strikes tranche T from the mark of each statement whose own id is named (the whole mark when T was its only tranche);
+// a line that only cites a named id is not its statement, and nothing else in the text changes.
 export function strike(text, ids, T) {
   const want = new Set(ids);
-  return text.split('\n').map((l) => (idsOf(l).some((id) => want.has(id)) ? l.replace(MARK, (all, list) => {
+  return text.split('\n').map((l) => (want.has(leadOf(l)) ? l.replace(MARK, (all, list) => {
     if (!tranchesOf(list).includes(T)) return all;
     const rest = tranchesOf(list).filter((x) => x !== T);
     return rest.length ? ` *(not yet met: ${rest.join(', ')})*` : '';
@@ -131,24 +154,19 @@ export function fixtureLimit(manifest) {
 }
 const SUP = { '⁰': 0, '¹': 1, '²': 2, '³': 3, '⁴': 4, '⁵': 5, '⁶': 6, '⁷': 7, '⁸': 8, '⁹': 9 };
 const SCALE = { thousand: 1e3, k: 1e3, million: 1e6, m: 1e6, billion: 1e9, b: 1e9 };
-// The counts a line names: "1,000,000-row", "10⁶ rows", "10^6", "2M rows", "a million rows".
-function counts(line) {
-  const out = [];
-  for (const m of line.matchAll(/10(?:\^(\d+)|([⁰¹²³⁴⁵⁶⁷⁸⁹]+))/g)) out.push(10 ** Number(m[1] ?? [...m[2]].map((c) => SUP[c]).join('')));
-  for (const m of line.matchAll(/(?<![\w^.])(\d[\d,_]*(?:\.\d+)?)\s*-?\s*(thousand|million|billion|[kmb](?![a-z]))?/gi)) {
-    if (/^10$/.test(m[1]) && /^[\^⁰¹²³⁴⁵⁶⁷⁸⁹]/.test(line.slice(m.index + m[0].length))) continue;
-    out.push(Number(m[1].replace(/[,_]/g, '')) * (SCALE[(m[2] || '').toLowerCase()] || 1));
-  }
-  for (const m of line.matchAll(/\ba (thousand|million|billion)\b/gi)) out.push(SCALE[m[1].toLowerCase()]);
-  return out;
+// A fixture's size: a count the line names as rows, records, elements … ("1,000,000-row", "10⁶ elements", "10^6 distinct
+// records", "2M rows", "a million rows"); any other number on the line (a result, a timeout) is not one.
+const FIXTURE = /(10\^(\d+)|10([⁰¹²³⁴⁵⁶⁷⁸⁹]+)|(?<![\w^.,])(\d[\d,_]*(?:\.\d+)?)(?:\s*-?\s*(thousand|million|billion|[kmb])(?![a-z]))?|\ba (thousand|million|billion))\s*-?\s*(?:[a-z]+\s+)?(rows?|records?|elements?|items?|entries|entry|documents?|bundles?|users?|events?)\b/gi;
+export function fixtureSizes(line) {
+  return [...line.matchAll(FIXTURE)].map((m) => (m[2] ? 10 ** Number(m[2]) : m[3] ? 10 ** Number([...m[3]].map((c) => SUP[c]).join('')) : m[6] ? SCALE[m[6].toLowerCase()] : Number(m[4].replace(/[,_]/g, '')) * (SCALE[(m[5] || '').toLowerCase()] || 1)));
 }
-// A Test line is a measurement when it names a fixture (rows, records, elements …) above the product's size, or a figure
-// on a deployed copy.
+// A figure taken on a deployed copy: the line places a measure (a number) on a deployed, production, staging or live copy.
+const DEPLOYED = /\b(?:on|against|in|from|of)\s+(?:the\s+|a\s+)?(?:deployed|production|staging|live)\b/i;
+// A Test line is a measurement when it names a fixture larger than the product's size, or a figure on a deployed copy.
 export function isMeasurement(line, manifest) {
-  if (/\b(deployed|production|staging)\b/i.test(line) || /\blive (copy|site|deployment|service)\b/i.test(line)) return true;
-  if (!/\b(rows?|records?|elements?|items?|entries|documents?|bundles?|fixtures?|users?)\b/i.test(line)) return false;
+  if (DEPLOYED.test(line) && /\d/.test(line)) return true;
   const limit = fixtureLimit(manifest);
-  return counts(line).some((n) => n > limit);
+  return fixtureSizes(line).some((n) => n > limit);
 }
 
 // ---- R5, R6: a job's reading set against its budget ----
@@ -166,12 +184,39 @@ const moduleOf = (R, m) => {
   if (!x) throw new Error(`no module ${m} in build/modules.json`);
   return x;
 };
-// A job's own set (BLD 1, SESSIONS §3): its requirements, both parts, whole (never a summary: SES-7); its layer's contract
-// (the table's head and its layer's row); of each used module the services its Uses line names, each its Provides block,
-// with that module's Purpose (issue 71). Its code and tests are listed to read whole; they are the module's own size (P6).
-export function readingSet(R, m, table) {
+// The files a path names: a file, or every tracked file under a directory (`R.g`'s ls-files), as the product's paths.
+function filesOf(R, p) {
+  let t = null, dir = p.endsWith('/');
+  if (!dir) { try { t = R.read(p); } catch { dir = true; } }
+  if (!dir) return t === null ? [] : [[p, t]];
+  const base = R.rel('.'), out = [];
+  for (const f of R.g(['ls-files', '-z', '--', R.rel(p)]).split('\0').filter(Boolean)) {
+    const q = base === '.' ? f : posix.relative(base, f), x = R.read(q);
+    if (x !== null) out.push([q, x]);
+  }
+  return out;
+}
+// The module's entries in the plan: the lines under a heading that names it (`**m**` or `**a**, **m**`), every layer.
+function entriesOf(plan, m) {
+  const out = [];
+  let under = [];
+  for (const l of (plan || '').split('\n')) {
+    if (/^#/.test(l)) { under = []; continue; }
+    if (/^\*\*[a-z][a-z0-9-]*\*\*(,\s*\*\*[a-z][a-z0-9-]*\*\*)*(\s*\(.*\))?\s*$/.test(l)) { under = [...l.matchAll(/\*\*([a-z][a-z0-9-]*)\*\*/g)].map((x) => x[1]); continue; }
+    if (under.includes(m) && /^- /.test(l)) out.push(l);
+  }
+  return out;
+}
+// A job's own set (BLD 1; R5): its START (given by the caller once it exists; before, the module's entries from the plan,
+// which the START carries); its requirements, both parts, whole (never a summary: SES-7); its layer's contract (the
+// table's head and its layer's row); of each used module its Purpose and the services its Uses line names, or all its
+// Provides when it names none (K20: an over-count errs toward refusing); its code; and its tests that name an id its
+// entries change (an id the entries name, or one whose statement cites a canon id they name). Every part is counted.
+export function readingSet(R, m, table, start = null) {
   const budget = budgetOf(table), x = moduleOf(R, m), own = `build/requirements/${m}.md`, files = [own], missing = [], trimmed = [];
   let bytes = 0;
+  const entries = entriesOf(R.read('build/plan/current.md'), m);
+  if (start !== null) bytes += Buffer.byteLength(start); else bytes += Buffer.byteLength(entries.join('\n'));
   const ownText = R.read(own); if (ownText === null) missing.push(own); else bytes += Buffer.byteLength(ownText);
   const layers = R.read('build/layers.md');
   if (layers === null) missing.push('build/layers.md');
@@ -185,14 +230,25 @@ export function readingSet(R, m, table) {
     if (u.startsWith('*')) continue;
     const f = `build/requirements/${u}.md`, t = R.read(f);
     if (t === null) { missing.push(f); continue; }
-    const { purpose, blocks } = serviceBlocks(t), want = new Set(named.get(u) || []);
-    const hit = blocks.filter((b) => b.names.some((n) => want.has(n)));
+    const purpose = t.split(/^## Private/m)[0].match(/^### Purpose\b[\s\S]*?(?=^### |(?![\s\S]))/m)?.[0] ?? '', blocks = provided(t), want = new Set(named.get(u) || []);
+    const hit = want.size ? blocks.filter((b) => b.names.some((n) => want.has(n))) : blocks;
     bytes += Buffer.byteLength(purpose) + hit.reduce((n, b) => n + Buffer.byteLength(b.text), 0);
-    files.push(hit.length ? `${f} (Public: Purpose; ${hit.flatMap((b) => b.names).join(', ')})` : `${f} (Public: Purpose; no service named in its Uses line: read a service whole when the job touches it)`);
-    trimmed.push(`${f} to its Purpose${hit.length ? ` and ${hit.flatMap((b) => b.names).join(', ')}` : ''}`);
+    const which = want.size ? hit.flatMap((b) => b.names).join(', ') || 'none of its services matched' : 'all of Provides: no service named in its Uses line';
+    files.push(`${f} (Public: Purpose; ${which})`);
+    trimmed.push(`${f} to its Purpose and ${which}`);
   }
+  // its code: the files of its paths, less its test material (its tests paths, and the directories its test files sit in,
+  // with what is below them: fixtures); a test is read only when it names a changed id
+  const testDirs = (x.tests || []).map((p) => (p.endsWith('/') ? p : `${posix.dirname(p)}/`));
+  const isTest = (q) => (x.tests || []).includes(q) || testDirs.some((d) => d !== './' && q.startsWith(d));
+  for (const p of x.paths || []) for (const [q, t] of filesOf(R, p)) if (!isTest(q)) bytes += Buffer.byteLength(t);
+  const said = entries.join('\n'), canon = new Set(said.match(/\b[A-Z]{2,4}-\d+\b/g) || []), direct = new Set(said.match(/\bR\d+\b/g) || []);
+  const changed = (ownText || '').split('\n').map((l) => [leadOf(l), l]).filter(([id, l]) => id && (direct.has(id) || [...(l.match(/\b[A-Z]{2,4}-\d+\b/g) || [])].some((c) => canon.has(c)))).map(([id]) => id);
+  const tests = [];
+  for (const p of x.tests || []) for (const [q, t] of filesOf(R, p)) if (changed.some((id) => new RegExp(`\\b${id}\\b`).test(t))) { bytes += Buffer.byteLength(t); tests.push(q); }
+  if ((x.tests || []).length) trimmed.push(`the tests to those naming ${changed.join(', ') || 'no id its entries change'}${tests.length ? ` (${tests.join(', ')})` : ''}`);
   const over = bytes > budget;
-  return { files, code: [...(x.paths || []), ...(x.tests || [])], bytes, budget, over, trimmed, missing };
+  return { files, code: [...(x.paths || []), ...(x.tests || [])], bytes, budget, over, trimmed, missing, changed, tests };
 }
 // The record of a set over its budget (SES-6): its size, the module, and what was trimmed; the job is not started.
 export function overrun(m, rs) {

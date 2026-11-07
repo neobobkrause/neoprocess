@@ -10,7 +10,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as N from '../proc.mjs';
 import { versionCommand, processHead } from '../platform.mjs';
-import { MEASUREMENT_RULE } from '../requirements.mjs';
+import { MEASUREMENT_RULE, budgetOf } from '../requirements.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url)), TOY = join(HERE, '..', '..', 'dryrun');
 const B1 = 'session_01BBBBBBBBBBBBBBBBBBBBBBBB', B2 = 'session_01BBBBBBBBBBBBBBBBBBBBBBB2', J1 = 'session_01AAAAAAAAAAAAAAAAAAAAAAAA', L1 = 'session_01LLLLLLLLLLLLLLLLLLLLLLLL';
@@ -298,6 +298,27 @@ test('the epoch closes only when nothing is open, and the state branch is really
 });
 
 const J2 = 'session_01AAAAAAAAAAAAAAAAAAAAAAA2', J3 = 'session_01AAAAAAAAAAAAAAAAAAAAAAA3';
+test('a set over its budget is recorded and its job not started: layer start and job start both refuse (requirements R5; SES-6)', () => {
+  const w = world(), o = (x) => O(w, x), R = N.repo(w.bob.dir), req = join(w.bob.dir, 'build/requirements/alpha.md'), small = readFileSync(req, 'utf8');
+  const big = `${small}\n${'- a long private note, kept for the test.\n'.repeat(Math.ceil(budgetOf(N.SET_TABLE) / 40))}`;
+  const overrunOf = () => g(w.bob.root, 'show', 'origin/state/E1:jobs/alpha/overrun.md');
+  writeFileSync(join(w.bob.dir, 'build/plan/current.md'), '# Plan: test T1\n\n**Status** · OPEN.\n\n## Layer 1\n\n**alpha**\n- N1 · Add `twice(a) → number` (R6).\n');
+  writeFileSync(req, big);
+  N.commitPush(R, N.TRANCHE, ['build/plan/current.md', 'build/requirements/alpha.md'], 'plan T1, alpha too large');
+  N.epochOpen(o()); N.takeover(o({ name: 'BOB #1', session: B1 }));
+  assert.throws(() => N.layerStart(o({ layer: 1 })), /alpha: its own set is \d+ bytes, over its budget of \d+ .*BLOCKED: reading/);
+  assert.match(overrunOf(), /^- size: \d+ bytes, budget \d+/m); assert.match(overrunOf(), /^- module: alpha$/m);
+  assert.deepEqual(N.status(o()).jobs, []);
+  // brought under, started; then the set grows past the budget before the job's start: refused, still STARTING
+  writeFileSync(req, small); N.commitPush(R, N.TRANCHE, ['build/requirements/alpha.md'], 'alpha trimmed');
+  N.layerStart(o({ layer: 1 })); N.jobPr(o({ module: 'alpha', number: 11 })); N.jobStarted(o({ module: 'alpha', name: 'ALPHA #1', session: J1 }));
+  writeFileSync(req, big); N.commitPush(R, N.TRANCHE, ['build/requirements/alpha.md'], 'alpha grew');
+  const alpha = w.clone('alpha'); g(alpha.root, 'checkout', '-q', '--detach', 'origin/job/alpha');
+  assert.throws(() => N.jobStart({ product: alpha.dir, module: 'alpha', session: J1 }), /alpha: its own set is \d+ bytes, over its budget .*the job is not started/);
+  assert.deepEqual(N.status(o()).jobs.map((j) => [j.module, j.state]), [['alpha', 'STARTING']]);
+  assert.match(overrunOf(), /^- trimmed: build\/layers\.md to its head/m);
+});
+
 test('the job\'s life (JOB-LIFE): layer start, the job\'s turn, the gate with the marks struck, review, the queue\'s merge, re-open, retire, layer close, metrics', () => {
   const w = world(), o = (x) => O(w, x), R = N.repo(w.bob.dir), g2 = (...a) => g(w.bob.root, ...a);
   // the running plan and a requirement written ahead (not yet met), on the tranche

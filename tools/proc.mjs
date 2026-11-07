@@ -1129,11 +1129,12 @@ export function jobStart(o) {
   R.fetch(TRANCHE); history(R, `origin/${TRANCHE}`, 'HEAD');
   try { R.g(['merge', '-q', '--no-edit', `origin/${TRANCHE}`]); } catch { spawnSync('git', ['-C', R.root, 'merge', '--abort']); refuse(`merging ${TRANCHE} into ${jobBranch(m)} conflicts: resolve it, then start again`); }
   if (unpushed(R).length) R.g(['push', '-q', 'origin', `HEAD:refs/heads/${jobBranch(m)}`]);
+  const start = stateRead(R, `jobs/${m}/start.md`), rs = readingSet(R, m, SET_TABLE, start);
+  if (rs.over) { stateWrite(R, { [`jobs/${m}/overrun.md`]: overrun(m, rs) }, `${m}: reading set over budget (SES-6)`); refuse(`${m}: its own set is ${rs.bytes} bytes, over its budget of ${rs.budget} (SES-5, SES-6; recorded in jobs/${m}/overrun.md): BLOCKED: reading; the job is not started: BOB brings the set under by trimming or splitting (REQ-6)`); }
   writeRole(R, { role: 'job', product: R.rel('.'), session: o.session, name: j.name, module: m, epoch: e });
   const state = ['STARTING', 'REOPENED'].includes(j.state) ? 'WORKING' : j.state;   // a successor keeps a recorded wait
   const commit = saveJob(R, m, { ...j, state }, `${m}: ${j.name} ${state.split(':')[0].toLowerCase()}`);
-  const rs = readingSet(R, m, SET_TABLE);
-  return { commit, name: j.name, pr: j.pr, state, process: processHead(), start: stateRead(R, `jobs/${m}/start.md`), reading: rs, size: rs.over ? `SIZE: the module's set is ${rs.bytes} bytes, over its budget of ${rs.budget} (SES-5): BLOCKED: reading` : null, check: selfcheck(R, jobBranch(m)) };
+  return { commit, name: j.name, pr: j.pr, state, process: processHead(), start, reading: rs, size: null, check: selfcheck(R, jobBranch(m)) };
 }
 // The job's state line: read (the goal's proof) or set to WORKING or a wait; COMPLETE only by `job complete`.
 export function jobState(o) {
