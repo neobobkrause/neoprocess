@@ -87,6 +87,8 @@ export function withArtifacts(R, fn) {
     for (const f of moved.filter((x) => !tracked.includes(x))) spawnSync('rm', ['-rf', '--', join(R.root, f)]);
   }
 }
+// A job's own suite run (tools/jobs.mjs) sees the artifacts as its merge will make them, by this function.
+wire({ withArtifacts: (R, fn) => withArtifacts(R, fn) });
 const rawGit = (dir, args) => spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8', maxBuffer: 1 << 28 }).stdout || '';
 const run = (cmd, args, cwd) => spawnSync(cmd, args, { encoding: 'utf8', cwd, maxBuffer: 1 << 28 });
 const lastLine = (r) => `${r.stdout || ''}${r.stderr || ''}`.trim().split('\n').pop();
@@ -202,6 +204,7 @@ export function allChecks(R) {
 // or a test run with its totals (`3/3`, `pass 3`, `3 pass`, `tests 3`). Returns the items, or null with no section.
 // The report's evidence forms are the jobs module's (tools/jobs.mjs, R5), read here by the legacy callers.
 export { EVIDENCE_FORMS, EVIDENCE_ITEM, evidenceItems } from './jobs.mjs';
+import { wire } from './jobs.mjs';
 
 // ---- steps for Bob (P20) ----
 

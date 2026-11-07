@@ -1,0 +1,62 @@
+name: gate
+# Written from the gate module's template (tools/gate.yml.tmpl; build/requirements/gate.md R3, R5): the module's own suite
+# and the checks scoped to it, against the pull request's base, once per pull request tip; triggered only by a module's
+# paths and tests, the generated artifacts and the files the checks read, never by any other record path.
+on:
+  pull_request:
+    branches: [{{TRANCHE}}]
+    types: [opened, synchronize, reopened]
+    paths:
+{{PATHS}}
+concurrency:
+  group: gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+{{PROCESS_CHECKOUT}}      - uses: actions/setup-node@v4
+        with:
+          {{NODE}}
+{{INSTALL}}      - name: the gate (artifacts, the module's own suite, the checks scoped to it), against the merge ref's own base
+        run: node {{PROC}}/tools/gate.mjs gate --product "{{PRODUCT}}" --base HEAD^1
+      - name: the checks' result (build/requirements/architecture.md R3)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: checks-result
+          path: {{RESULT}}
+          if-no-files-found: ignore
+# ==== regression ====
+name: regression
+# Written from the gate module's template (tools/gate.yml.tmpl; build/requirements/gate.md R7): the full product
+# regression, its own workflow with its own time budget, dispatched only by the tranche's close for a release or on Bob's word.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "the branch to test"
+        required: true
+        default: {{TRANCHE}}
+      why:
+        description: "release (the tranche's close) or bob (Bob's word)"
+        required: true
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: {{MINUTES}}
+    steps:
+      - name: only for a release or on Bob's word
+        run: case "${{ inputs.why }}" in release|bob) ;; *) echo "the regression is dispatched only for release or bob"; exit 1 ;; esac
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+{{PROCESS_CHECKOUT}}      - uses: actions/setup-node@v4
+        with:
+          {{NODE}}
+{{INSTALL}}      - name: every module's suite and the checks whole
+        run: node {{PROC}}/tools/gate.mjs regression --product "{{PRODUCT}}"
