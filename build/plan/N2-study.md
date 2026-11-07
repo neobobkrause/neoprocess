@@ -54,3 +54,19 @@ Layer 1's two jobs ran about 90 minutes each (record 89m16s, platform 91m28s). T
 Not causes, measured and left: worker restarts (four, about 3 s each, study-platform §5); file reads (2 % of record's tool time, 4 % of platform's). The model writing with no tool running (record 58 % of turn time, platform 27 % of wall) is the work itself.
 
 **Confirmation.** At layer 2's close: each job's wall clock, its share waiting on the architecture session, its full-suite runs in-session (expected 0), its review rounds (expected 1), and the architecture session's tool minutes by kind, set beside the figures above.
+
+## 4. Confirmation: layer 2 beside layer 1 (BOB #3, 7 Nov 2026, 07:0xZ)
+
+Measured from the state branch, the merge commits and `get_session` usage; what is not measured is named unknown.
+
+| measure | layer 1 (30 Oct) | layer 2 (7 Nov) |
+| --- | --- | --- |
+| job start to merge | platform 20:30 to 22:06 (96 min); record 20:30 to its merge on 7 Nov (an account switch between) | requirements 06:11:33 to 06:30:52Z (19 min); architecture 06:11:34 to 06:59:22Z (48 min, of which it waited from 06:34 to 06:39 for requirements' merge) |
+| independent review rounds | platform 4, record 2 (+1 on 7 Nov) | 1 each, then one fix cycle each, verified by the architecture session (K15) |
+| gaps per review | 7, 3, 1, 4; 18, 5 | 9 (7 the job's); 9 (5 the job's) |
+| cache-read tokens per job session | platform 73.1 M, record 60.9 M (to 22:00Z) | requirements 22.7 M, architecture 46.9 M |
+| the architecture session | 177.4 M cache read for layer 1 (BOB #2) | 58.1 M for its whole session to 07:00Z (takeover, layer 1's close, layer 2, layer 3's start); the model check of messages not run (C3) |
+| full-suite runs in-session by a job | record 11 + 3, platform 7 in the background | unknown (no transcript read) |
+| time jobs waited on the architecture session | 33-47 % | unknown (no transcript read) |
+
+**Read.** C1 and C3 are confirmed by count: one review per job and no model check. Wall clock fell from about 90 minutes per job to 19 and 48, and job tokens by a third to two thirds; C2 and C4 are consistent with that but unmeasured, and a transcript study of layer 3's jobs (study-record's method) settles them.
