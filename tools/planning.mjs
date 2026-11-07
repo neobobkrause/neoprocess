@@ -289,6 +289,7 @@ export async function trancheClose(o, deps = {}) {
   const R = repo(o.product); on(R, TRANCHE);
   const e = needEpoch(R), plan = parsePlan(stateRead(R, 'plan.md') || '');
   if (R.read(PLAN)) refuse(`a round is open (${PLAN} exists): close it first`);
+  { const T0 = archivedTranche(R); if (T0 && R.read(completionFile(T0)) !== null) refuse(`the completion round is not run: ${completionFile(T0)} exists (open it with round open --completion; PLN-4)`); }
   if (plan.owed.length) refuse(`acts still owed: ${plan.owed.join('; ')}`);
   const open = deps.asks(R) || []; if (open.length) refuse(`asks still open: ${open.join(', ')}`);
   const live = [...jobFiles(R), ...stateList(R, 'lanes')].filter((p) => /· LIVE |· (STARTING|WORKING|WAITING|BLOCKED|NEEDS BOB|COMPLETE|REOPENED|MERGED)/.test(stateRead(R, p) || ''));

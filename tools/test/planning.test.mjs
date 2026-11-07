@@ -99,6 +99,10 @@ test('R2 trancheClose only when every round is archived and every job merged: ma
   jobLine(p, 'alpha', 'ARCHIVED', 3);
   planEdit(p.R, (q) => ({ ...q, layers: { 1: 'CLOSED', 2: 'CLOSED' } }), 'layers run');
   P.roundClose(p.o());
+  // a completion round not yet run: the tranche's rounds are not all archived
+  put(p.dir, P.completionFile('T1'), planText('T1', [[1, [['alpha', 'T1-8', 'XYZ-1']]]], { title: '# Plan: the completion round · T1' })); commitPush(p.R, TRANCHE, [P.completionFile('T1')], 'a completion entry');
+  await assert.rejects(P.trancheClose(p.o(), CLOSE), /the completion round is not run: build\/plan\/T1-completion\.md exists/);
+  rmSync(join(p.dir, P.completionFile('T1'))); commitPush(p.R, TRANCHE, [P.completionFile('T1')], 'the entry moved for this test');
   await assert.rejects(P.trancheClose(p.o(), { ...CLOSE, asks: () => ['A1'] }), /asks still open: A1/);
   await assert.rejects(P.trancheClose(p.o(), CLOSE), /entries whose module's job is not merged: beta \(T1-2\)/);
   mergeJob(p, 'beta', 4);
