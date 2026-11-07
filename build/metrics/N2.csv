@@ -1,2 +1,3 @@
 session,role,name,module,cache-read,cache-write,input,output,test runs,module lines,reviewed,note
 session_012hdw2QxUDNXwUB3U6vpCyo,job,RECORD #2,record,9456803,251921,1130,22056,5,1147,1/1,
+session_01RAN5enucmXTQSLEYL3QPrK,job,PLATFORM #1,platform,,,,,6,907,1/1,unmeasured: on the previous Claude account: get_session from this account does not find its sessions (7 Nov); its usage at 22:00Z on 30 Oct is in build/plan/N2-study.md §1
