@@ -202,6 +202,15 @@ test('R5 job complete: the report\'s form; the job\'s own review by the reviewer
   const jp = J.jobPosted(co({ ready: true }));
   assert.equal(jp.send.session_id, B1); assert.match(jp.send.message, /^COMPLETE #1: core \(PR #11\); the report is its comment and it is ready for review\.$/);
   assert.throws(() => J.jobPosted(co({ ready: true })), /nothing cleared/);
+  // a CHANGE right after COMPLETE: the same branch and PR, back to WORKING, the owed acts gone, the PR to draft as printed
+  const rc = J.jobReopen(w.o({ module: 'core', changeFile: put(w.base, 'c0.md', 'CHANGE: R2 also says triple is pure; say so where it is defined.\n') }));
+  assert.deepEqual([rc.state, rc.draft.tool, rc.draft.pullNumber, rc.draft.draft, rc.send.session_id], ['WORKING', 'update_pull_request', 11, true, C1]);
+  assert.deepEqual([J.jobOf(w.R, 'core').state, J.jobOf(w.R, 'core').owed, J.jobOf(w.R, 'core').pr], ['WORKING', [], 11]);
+  assert.match(REC.stateRead(w.R, 'jobs/core/start.md'), /\nCHANGE: R2 also says triple is pure/);
+  assert.deepEqual(w.R.heads('refs/heads/job/*').sort(), ['job/app', 'job/core']);
+  put(core, 'core/src/index.mjs', readFileSync(join(core, 'core/src/index.mjs'), 'utf8').replace('// R2: triple.', '// R2: triple, pure.')); g(core, 'add', '-A'); g(core, 'commit', '-q', '-m', 'core: the CHANGE');
+  assert.equal(J.jobComplete(co({ reportFile: f.report, reviewFile: f.review })).acts[0].issue_number, 11);
+  J.jobPosted(co({ comment: 502, ready: true }));
 
   // app waits on core (the plan's order): only its comment is printed; ready is BOB's act after core merges
   const app = w.clone('app', 'job/app'), ao = (x = {}) => ({ product: app, module: 'app', ...x });
@@ -221,7 +230,7 @@ test('R5 job complete: the report\'s form; the job\'s own review by the reviewer
   const rpt = put(w.base, 'r6.md', '**Met** · none\n**Elsewhere** · none\n**Evidence**\n- core/test/core.test.mjs:6\n');
   const again = J.jobComplete(co({ reportFile: rpt, reviewFile: f.review }));
   assert.equal(again.acts[0].issue_number, 13);
-  assert.equal(J.jobOf(w.R, 'core').runs, 2);
+  assert.equal(J.jobOf(w.R, 'core').runs, 3);
   const j2 = J.jobOf(w.R, 'core');
   REC.stateWrite(w.R, { 'jobs/core.md': J.fmtJob('core', { ...j2, state: 'WORKING', suite: 90_000 }) }, 'core: its suite took 90 s');
   const ci = J.jobComplete(co({ reportFile: rpt, reviewFile: f.review }));
@@ -256,7 +265,13 @@ test('R6 job route: a live session is messaged; one gone is replaced by a succes
   assert.deepEqual(REC.parsePlan(REC.stateRead(w.R, 'plan.md')).owed, ['open PR app', 'start app', 'start core']);
   J.jobStarted(w.o({ module: 'core', name: 'CORE #2', session: C2 }));
   const next = w.clone('core2', 'job/core');
-  assert.equal(J.jobStart({ product: next, module: 'core', session: C2 }).brief, r.brief.trimEnd());   // the successor's start prints its brief
+  const ss = J.jobStart({ product: next, module: 'core', session: C2 });
+  assert.equal(ss.brief, r.brief.trimEnd());   // the successor's start prints its brief
+  assert.doesNotMatch(ss.start, /^Read whole, by path:/m);   // and not the whole-module read line
+  assert.match(ss.start, /^START CORE #1 · T1 · layer 1 · module core\nEntries:\n- N1/);
+  assert.deepEqual(ss.reading.sizes.map((x) => x.path), ['the route brief (jobs/<m>/route.md)', "the branch's diff (git diff origin/tranche...HEAD)"]);
+  assert.equal(ss.reading.bytes, ss.reading.sizes.reduce((n, x) => n + x.bytes, 0));
+  assert.equal(J.attemptsOf(w.R, 'core').find((a) => a.session === C2).reading, ss.reading.bytes);   // the brief's set is the attempt's reading
   assert.equal(J.jobRoute(w.o({ module: 'core', sessionStatus: 'archived' })).title, 'CORE #3');
   // a declared stop: abandoned starts no successor and sends nothing; the job's own start refuses
   REC.stop(w.R, 'a process flaw', { core: 'abandoned', app: 'complete-allowed' }, 'abc1234');
@@ -280,6 +295,7 @@ test('R7 job retire: a record line once nothing more can reach the job; its usag
   const app = J.jobOf(w.R, 'app');
   REC.stateWrite(w.R, { 'jobs/app.md': J.fmtJob('app', { ...app, state: 'MERGED' }) }, 'app: MERGED');
   assert.throws(() => J.jobRetire(w.o({ module: 'core', usage: '{}', unmeasured: 'x' })), /not both/);
+  assert.throws(() => J.jobRetire(w.o({ module: 'core', unmeasured: ' ' })), /name the refusal/);
   assert.throws(() => J.jobRetire(w.o({ module: 'core', usage: JSON.stringify({ input_tokens: 3 }) })), /the usage lacks cache_read_tokens/);
   g(w.bob, 'fetch', '-q', 'origin'); g(w.bob, 'merge', '-q', '--ff-only', `origin/${REC.TRANCHE}`);
   const rt = J.jobRetire(w.o({ module: 'core' }));

@@ -299,18 +299,26 @@ export function jobStart(o) {
   R.fetch(TRANCHE); base(R, `origin/${TRANCHE}`, 'HEAD');
   try { R.g(['merge', '-q', '--no-edit', `origin/${TRANCHE}`]); } catch { spawnSync('git', ['-C', R.root, 'merge', '--abort']); refuse(`merging ${TRANCHE} into ${jobBranch(m)} conflicts: resolve it, then start again`); }
   if (unpushed(R).length) R.g(['push', '-q', 'origin', `HEAD:refs/heads/${jobBranch(m)}`]);
-  const start = stateRead(R, `jobs/${m}/start.md`), rs = readingSet(R, m, SET_TABLE, start);
+  // a successor routed with a brief reads by the brief (R6): the branch and the pull request, never the whole module again
+  const start = stateRead(R, `jobs/${m}/start.md`), brief = routeBriefFor(R, m, j.name), rs = brief ? briefSet(R, brief) : readingSet(R, m, SET_TABLE, start);
   if (rs.over) { stateWrite(R, { [`jobs/${m}/overrun.md`]: overrun(m, rs) }, `${m}: reading set over budget (SES-6)`); refuse(`${m}: its own set is ${rs.bytes} bytes, over its budget of ${rs.budget} (SES-5, SES-6; recorded in jobs/${m}/overrun.md): BLOCKED: reading; the job is not started: BOB brings the set under by trimming or splitting (REQ-6)`); }
   writeRole(R, { role: 'job', product: R.rel('.'), session: o.session, name: j.name, module: m, epoch: e });
   const state = ['STARTING', 'REOPENED'].includes(j.state) ? 'WORKING' : j.state;   // a successor keeps a recorded wait
   const attempts = attemptsOf(R, m), mine = attempts.find((a) => a.session === o.session);
   const more = mine ? {} : { [`jobs/${m}/attempts.md`]: `${[`# ${m}: one line per attempt (transient)`, ...attempts.map(fmtAttempt), fmtAttempt({ name: j.name, session: o.session, reading: rs.bytes, at: now() })].join('\n')}\n` };
   const commit = saveJob(R, m, { ...j, state }, `${m}: ${j.name} ${state.split(':')[0].toLowerCase()}`, more);
-  const brief = routeBriefFor(R, m, j.name);
-  return { commit, name: j.name, pr: j.pr, state, process: processHead(), start, ...(brief ? { brief } : {}), reading: { ...rs, sizes: setSizes(R, rs) }, size: null, check: selfcheck(R, jobBranch(m)) };
+  return { commit, name: j.name, pr: j.pr, state, process: processHead(), start: brief ? start.replace(/^Read whole, by path: .*\n?/m, '') : start, ...(brief ? { brief } : {}), reading: { ...rs, sizes: rs.sizes ?? setSizes(R, rs) }, size: null, check: selfcheck(R, jobBranch(m)) };
 }
 // The successor's brief, as `job route` stored it for that session's name (the hooks compare its create_session with it).
 export const routeBriefFor = (R, m, name) => { const b = stateRead(R, `jobs/${m}/route.md`); return b && b.startsWith(`ROUTE ${name} `) ? b : ''; };
+// A successor's set is what its brief names: the brief itself, the pull request's body (the START, its entries and every
+// CHANGE, without its whole-module read line) and the branch's diff against the tranche, each measured, against the budget.
+function briefSet(R, brief) {
+  const budget = budgetOf(SET_TABLE), diff = R.g(['diff', `origin/${TRANCHE}...HEAD`]);
+  const sizes = [{ path: 'the route brief (jobs/<m>/route.md)', bytes: Buffer.byteLength(brief) }, { path: `the branch's diff (git diff origin/${TRANCHE}...HEAD)`, bytes: Buffer.byteLength(diff) }];
+  const bytes = sizes.reduce((n, x) => n + x.bytes, 0);
+  return { files: sizes.map((x) => x.path), code: [], bytes, budget, over: bytes > budget, trimmed: ['the whole module: a successor reads the branch and the pull request (R6)'], missing: [], changed: [], tests: [], sizes };
+}
 // Each path of the set with its size on the checkout: a file's bytes, a directory's tracked files' bytes together; a
 // file read in part (`build/layers.md (the head and …)`) is named with its whole size, the part counted in `bytes`.
 function setSizes(R, rs) {
@@ -467,16 +475,22 @@ export function jobPosted(o) {
   const after = owed.find((x) => /^ready after /.test(x));
   return { commit, owed, send: owedByJob({ owed }).length ? null : { session_id: recordAddr(R, 'bob'), message: `COMPLETE #${j.runs}: ${m} (PR #${j.pr}); the report is its comment${after ? `; ${after} merges (BOB marks it ready then)` : ' and it is ready for review'}.` } };
 }
-// R5, JOB-LIFE §7: a CHANGE after the merge re-opens the job in its session on a fresh branch and a new draft PR.
+// R5, JOB-LIFE §7: a CHANGE re-opens the job in its session: a COMPLETE one on its own branch and PR, back to WORKING; a
+// merged one on a fresh branch and a new draft PR.
 export function jobReopen(o) {
   const R = repo(o.product), m = o.module; if (!m || !o.changeFile) refuse('--module <m> --change-file <f>');
   on(R, TRANCHE);
   if (unpushed(R).length) refuse(`the tranche checkout is not pushed: ${unpushed(R).join('; ')}`);
   const j = loadJob(R, m);
-  if (j.state !== 'MERGED') refuse(`${m} reads ${j.state}: only a merged job is re-opened (JOB-LIFE §7)`);
+  if (!['MERGED', 'COMPLETE'].includes(j.state)) refuse(`${m} reads ${j.state}: only a COMPLETE or merged job is re-opened (JOB-LIFE §7)`);
   if (!j.session) refuse(`${m} has no live session: start a new job instead (proc layer start --modules ${m})`);
   const change = fileText(o.changeFile, '--change-file');
   if (!/^CHANGE\b/.test(change)) refuse('the change begins CHANGE');
+  // COMPLETE, not yet merged: the same branch and pull request, back to WORKING; the PR returns to draft as printed (BLD 10)
+  if (j.state === 'COMPLETE') {
+    const commit = saveJob(R, m, { ...j, state: 'WORKING', owed: [], review: null, merge: null }, `${m}: re-opened on a CHANGE before its merge`, { [`jobs/${m}/start.md`]: `${stateRead(R, `jobs/${m}/start.md`) || ''}\n${change}\n` });
+    return { commit, state: 'WORKING', draft: { tool: 'update_pull_request', ...ghRepo(R), pullNumber: j.pr, draft: true }, send: { session_id: j.session, message: `${change}\n(Your job is WORKING again on ${jobBranch(m)} and PR #${j.pr}: fix, then \`proc job complete\` again.)` } };
+  }
   const { id: T } = planId(R), tip = R.g(['rev-parse', 'HEAD']);
   jobBranchAt(R, m, tip, `${j.name} re-opens: ${T}, module ${m}`);
   const start = sized(startText(R, m, j.name, T, 're-opened after its merge', change, o), 'the re-opened START');
@@ -517,6 +531,7 @@ function writeRow(R, T, row, message) {
 export function jobRetire(o) {
   const R = repo(o.product), m = o.module; if (!m) refuse('--module <m> [--usage <json read by a route the platform allows> | --unmeasured "<why>"]');
   if (o.usage != null && o.unmeasured != null) refuse('--usage or --unmeasured, not both');
+  if (o.unmeasured != null && !String(o.unmeasured).trim()) refuse('--unmeasured "<why>": name the refusal (its words, or its refusal id)');
   on(R, TRANCHE);
   const j = loadJob(R, m);
   if (j.state !== 'MERGED') refuse(`${m} reads ${j.state}: a job retires merged (JOB-LIFE §8)`);
