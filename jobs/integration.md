@@ -5,5 +5,6 @@
 **Owed** · none
 **Model** · opus
 **Review** · no review · K15: the one review's five gaps verified closed by the architecture session on fix commits 76210f6, d53e7c8 (and the self-review's d75a2b3): --no-review after gaps names verified fix commits after the reviewed head; hasMerged counts MERGED or a Merges entry, for the order and the layer close; merged requires the printed tip with the branch gone; each layer test file run alone, its red to the file's owner; integration.test.mjs 7/7; gate green · concerns: diff of 886 lines (over 400); provided service changed (19 export line(s) differ)
+**Merge** · merging d75a2b3 2026-11-07T08:07:19.255Z
 **Reviews** · 1
 **Suite** · 21897 ms
