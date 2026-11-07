@@ -55,6 +55,7 @@
 
 **gate**
 - N2-23 · GAT-1, GAT-2, GAT-6: `tools/gate.mjs` holds `runGate` for CI only: the module's own suite and the checks scoped to it; `usersOfChange` and every user-suite path removed; the workflow template `tools/gate.yml.tmpl` triggers on the module's paths and tests, the files the checks read for it and generated inputs, never on record paths, read from record's `paths()` and proven by a test (record R12; K4).
+- N2-23a · ARC-5, GAT-7 (architecture's report J2, K22): the gate reads the checks' one result file (`checks/result.json`, or the path a manifest row naming "the checks' result" gives; architecture's `readResult`) and names each finding's module, file and line from it, never from the log.
 - N2-24 · GAT-4: artifacts regenerated, verified only when changed against HEAD.
 - N2-25 · GAT-5: every lock installed where it sits; Node from the product's version file (as today, proven live).
 - N2-26 · GAT-8: the full regression as its own workflow, dispatched only by `tranche close` for a release or on Bob's word.
@@ -103,6 +104,9 @@ proc-legacy (no job: retired by the jobs above)
 
 **record**
 - N2-47 · REC-7's fixture (K3): N2-8's halted-build fixture rebuilt from a frozen copy of Civicsmith's real state branch and handoff of 30 Oct, once a session on this account can read that repository (the record job built it from the measured description, its report of 30 Oct).
+
+**record**
+- N2-48 · REC-3, ARC-5 (architecture's report J2, K22): `status` lists the checks' findings from their one result file (`checks/result.json`, or the manifest row's path), read as JSON by record itself, since record is earlier than architecture and cannot import it.
 
 ## Deferred, with the hard reason (PLN 2)
 - INT-5's stages proven live, and the certification mark: a real product's full tranche, deployment and walk (a measurement that cannot happen inside this tranche).
