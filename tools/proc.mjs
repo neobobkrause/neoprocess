@@ -37,7 +37,7 @@
 //   defect --module <m> --what "<…>"      bob archived --name "BOB #n" --session <id> --usage <json> [--tranche <T>]
 //   reading --role <bob|job|lane|root|process|onboard>      gate [--module <m>] [--base <ref>]      shims [--process <path>] [--repo <owner/name>] [--ref <branch>] [--check]
 //   tranche open      (the plan is build/plan/next.md on main)      round open (--plan-file <f> | --completion)      round close [--next <f>]      tranche close      tranche merged --sha <commit>      footprint [--base <ref>]
-//   tranche report [--tranche <T>]      stop --why "<…>" --choices "<m> complete-allowed|abandoned, …"      resume --version <commit>      place --module <m> --entry "- <id> · …" [--defer bob|measurement|outside]      (tools/planning.mjs)
+//   tranche report [--tranche <T>] [--gate-runs '{"<m>": <n>}']      stop --why "<…>" --choices "<m> complete-allowed|abandoned, …"      resume --version <commit>      place --module <m> --entry "- <id> · …" [--defer bob|measurement|outside]      (tools/planning.mjs)
 //   ruling --text "<the ruling>" --why "<why>" [--module <m>] [--files <p1,p2>]      steps --file <steps.md> --source <p1,p2> (tools/lib.mjs, P20)
 //   say --file <draft.md> [--no-judge]      (issue 102: a message for Bob judged before it is sent; the turn's end skips what passed)
 //   repo setup --repo <owner/name> [--private] [--dry-run]      (PERMISSIONS §9: the repository and its two rulesets; from a session it prints the workflow's dispatch)

@@ -9,8 +9,8 @@
 //
 // Every path read or written is under the product's own repository (R9): a path a caller names is refused outside it.
 import { spawnSync } from 'node:child_process';
-import { rmSync } from 'node:fs';
-import { join, resolve, relative, isAbsolute } from 'node:path';
+import { rmSync, realpathSync, existsSync } from 'node:fs';
+import { join, resolve, relative, isAbsolute, dirname, basename } from 'node:path';
 import { TRANCHE, refuse, repo, ghRepo, readRole, recordLocal, ROLE_FILE, unpushed, commitPush, pruneRef, epoch, needEpoch, stateRead, stateList, stateWrite, parsePlan, planEdit, jobFiles, jobLines, stop as recordStop, resume as recordResume, pinOf, PLAN_FILE, metricsFile, CHOICES } from './record.mjs';
 import { parse } from './requirements.mjs';
 import { grantsHeld } from './platform.mjs';
@@ -40,10 +40,13 @@ export const HARD_REASON = /^(?:Bob's|a deployment|a measurement|outside the pro
 
 // ---- the product's own paths (R9; PLN-7) ----
 
-// A path a caller names, as the product-relative path it is; refused when it resolves outside the product's repository.
+// A path's real place: its links resolved (realpath) as far as it exists, the rest appended as named.
+const real = (abs) => { let d = abs, rest = []; while (!existsSync(d) && dirname(d) !== d) { rest.unshift(basename(d)); d = dirname(d); } return join(realpathSync(d), ...rest); };
+// A path a caller names, as the product-relative path it is; refused when it resolves outside the product's repository,
+// its symbolic links followed first (a link in the product pointing outside it is outside).
 export function within(R, p, what = 'path') {
   if (typeof p !== 'string' || !p) refuse(`${what}: a path in the product`);
-  const abs = isAbsolute(p) ? p : resolve(R.dir, p), r = relative(R.root, abs);
+  const abs = isAbsolute(p) ? p : resolve(R.dir, p), r = relative(realpathSync(R.root), real(abs));
   if (r.startsWith('..') || isAbsolute(r)) refuse(`${what} ${p} is outside the product's repository (${R.root}): planning reads and writes the product's own paths only (PLN-7)`);
   return relative(R.dir, abs);
 }
@@ -119,6 +122,15 @@ export const roundNumber = (R, T) => roundFiles(R, T).length + 1;
 // (BOB #3, 29 Oct: `refused routed` after the last round's close found no running plan; DRYRUN §4.19).
 export const trancheId = (R, given) => given || (R.read(PLAN) ? tranche(R).id : archivedTranche(R) ?? refuse(`${PLAN}: no running plan and no archived one: --tranche <T>`));
 
+// A round's plan put in place with the running plan's Status line kept, and so its pin: only `resume` moves the pin (R5).
+const STATUS_LINE = /^\*\*Status\*\* · .*$/m;
+function keepStatus(text, status) {
+  if (!status) return text;
+  return STATUS_LINE.test(text) ? text.replace(STATUS_LINE, () => status) : text.replace(/^(# Plan: .*\n)/m, (t) => `${t}\n${status}\n`);
+}
+// The Status line the tranche runs under: the open plan's, else the last archived round's of the tranche.
+const statusOf = (R, T) => (R.read(PLAN) || (T ? R.read(roundFiles(R, T).sort((a, b) => Number(a.match(/-R(\d+)\.md$/)[1]) - Number(b.match(/-R(\d+)\.md$/)[1])).pop() || '') : '') || '').match(STATUS_LINE)?.[0] ?? null;
+
 // ---- rounds (R3; PLN-3, PLN-4): a round's plan becomes current whole, refused while another round runs ----
 
 // `--plan-file` names the round's plan in the product; `--completion` opens the tranche's completion round file, which
@@ -127,14 +139,15 @@ export function roundOpen(o) {
   const R = repo(o.product); on(R, TRANCHE);
   if (!o.completion) within(R, o.planFile, '--plan-file');
   const cur = R.read(PLAN), plan = epoch(R) ? parsePlan(stateRead(R, 'plan.md') || '') : { layers: {} };   // a tranche opens before its epoch
-  if (cur) { const open = planSections(cur).filter((l) => plan.layers[l] !== 'CLOSED'); if (open.length) refuse(`a round is running: layer(s) ${open.join(', ')} of the current plan not closed (close the round first)`); }
+  // a round is open until round close archives its plan, whatever its layers read
+  if (cur) { const open = planSections(cur).filter((l) => plan.layers[l] !== 'CLOSED'); refuse(`a round is running: ${open.length ? `layer(s) ${open.join(', ')} of the current plan not closed` : `its layers are closed but ${PLAN} is not archived`} (close the round first)`); }
   const curT = cur ? tranche(R).id : archivedTranche(R);   // between rounds the archive names the tranche
   const file = o.completion ? (curT ? completionFile(curT) : refuse('--completion: no tranche is running')) : within(R, o.planFile, '--plan-file');
   const text = R.read(file) ?? refuse(`${file}: no such file`);
   checked(R, text, file);
   const T = titleId(text);
   if (curT && curT !== T && !o.newTranche) refuse(`the current plan is ${curT}'s; a plan for ${T} opens with a new tranche`);
-  R.write(PLAN, text);
+  R.write(PLAN, keepStatus(text, curT === T ? statusOf(R, T) : null));
   const paths = [PLAN];
   if (o.completion) { rmSync(join(R.dir, file)); paths.push(file); }   // the completion round's file moves into place
   const n = roundNumber(R, T), commit = commitPush(R, TRANCHE, paths, `plan ${T}: round R${n} opens${o.completion ? ' (the completion round)' : ''}`);
@@ -155,9 +168,10 @@ export function roundClose(o) {
   const n = roundNumber(R, T), arch = `${ARCHIVE}/${T}-R${n}.md`;
   R.write(arch, text);
   const nextOf = (f) => { const t = R.read(f); return t === null ? null : { f, t }; };
-  const cand = o.next ? (nextOf(within(R, o.next, '--next')) ?? refuse(`--next ${o.next}: no such file`)) : nextOf(completionFile(T)) ?? (() => { const c = nextOf(NEXT); return c && titleId(c.t) === T ? c : null; })();
+  // the next round of this tranche first (next.md titled for it); the completion round only when none waits (PLN-4)
+  const cand = o.next ? (nextOf(within(R, o.next, '--next')) ?? refuse(`--next ${o.next}: no such file`)) : (() => { const c = nextOf(NEXT); return c && titleId(c.t) === T ? c : null; })() ?? nextOf(completionFile(T));
   const paths = [arch, PLAN];
-  if (cand) { checked(R, cand.t, cand.f); R.write(PLAN, cand.t); rmSync(join(R.dir, cand.f)); paths.push(cand.f); } else rmSync(join(R.dir, PLAN));
+  if (cand) { checked(R, cand.t, cand.f); R.write(PLAN, keepStatus(cand.t, text.match(STATUS_LINE)?.[0] ?? null)); rmSync(join(R.dir, cand.f)); paths.push(cand.f); } else rmSync(join(R.dir, PLAN));
   const commit = commitPush(R, TRANCHE, paths, `plan ${T}: round R${n} closes${cand ? `; ${cand.f === completionFile(T) ? 'the completion round' : 'the next plan'} is current` : ''}`);
   planEdit(R, (p) => ({ ...p, layers: {} }), `round R${n} closed`);
   return { tranche: T, round: n, archived: arch, next: cand?.f ?? null, completion: cand?.f === completionFile(T), commit };
@@ -289,7 +303,8 @@ export async function trancheClose(o, deps = {}) {
   const R = repo(o.product); on(R, TRANCHE);
   const e = needEpoch(R), plan = parsePlan(stateRead(R, 'plan.md') || '');
   if (R.read(PLAN)) refuse(`a round is open (${PLAN} exists): close it first`);
-  { const T0 = archivedTranche(R); if (T0 && R.read(completionFile(T0)) !== null) refuse(`the completion round is not run: ${completionFile(T0)} exists (open it with round open --completion; PLN-4)`); }
+  { const T0 = archivedTranche(R); if (T0 && R.read(completionFile(T0)) !== null) refuse(`the completion round is not run: ${completionFile(T0)} exists (open it with round open --completion; PLN-4)`);
+    if (T0 && titleId(R.read(NEXT)) === T0) refuse(`a round of ${T0} waits: ${NEXT} is titled for this tranche (open it with round open --plan-file ${NEXT})`); }
   if (plan.owed.length) refuse(`acts still owed: ${plan.owed.join('; ')}`);
   const open = deps.asks(R) || []; if (open.length) refuse(`asks still open: ${open.join(', ')}`);
   const live = [...jobFiles(R), ...stateList(R, 'lanes')].filter((p) => /· LIVE |· (STARTING|WORKING|WAITING|BLOCKED|NEEDS BOB|COMPLETE|REOPENED|MERGED)/.test(stateRead(R, p) || ''));
@@ -390,11 +405,12 @@ export function choicesOf(s) {
 export function stop(o) {
   const R = repo(o.product); architect(R); on(R, TRANCHE);
   const plan = parsePlan(stateRead(R, 'plan.md') || ''), version = pinOf(durableStatus(R), plan) ?? refuse(`no pin: ${PLAN}'s Status line names none (\`pinned at \`<commit>\`\`)`);
-  const choices = choicesOf(o.choices), why = one(o.why);
+  const choices = choicesOf(o.choices), why = one(o.why).replace(/\s*·\s*/g, ' ');   // as record.stop writes it
   const stateCommit = recordStop(R, why, choices, version);
   const ch = Object.entries(choices).map(([m, c]) => `${m} ${c}`).join(', ');
   const text = R.read(PLAN);
-  const commit = text ? (R.write(PLAN, text.replace(/^(\*\*Status\*\* · .*?)\s*$/m, `$1 STOPPED ${today()} by the architecture session: ${why.replace(/`/g, "'")} at \`${version}\`${ch ? ` (${ch})` : ''}.`)), commitPush(R, TRANCHE, [PLAN], `plan: STOPPED at ${version}`)) : null;
+  // the durable plan's Status line carries the same form, so the stop outlives the epoch
+  const commit = text ? (R.write(PLAN, text.replace(/^(\*\*Status\*\* · .*?)\s*$/m, (_, l) => `${l.replace(/ · RESUMED \S+$/, '')} · STOPPED ${why} · ${version}`)), commitPush(R, TRANCHE, [PLAN], `plan: STOPPED at ${version}`)) : null;
   return { stopped: why, version, choices, state: stateCommit, commit, then: 'every session reads the stop at its next status and takes no new step; the fix is certified, then `proc resume --version <commit>`' };
 }
 // A resume clears the stop and moves the pin once, to the version the build runs from then on.
@@ -404,7 +420,7 @@ export function resume(o) {
   if (!/^[0-9a-f]{7,40}$/.test(v)) refuse('--version <the process commit the build runs from>');
   const stateCommit = recordResume(R, v);
   const text = R.read(PLAN);
-  const commit = text ? (R.write(PLAN, text.replace(/^(\*\*Status\*\* · .*?)\s*$/m, `$1 RESUMED at \`${v}\` (${today()}; the pin moved once).`)), commitPush(R, TRANCHE, [PLAN], `plan: RESUMED at ${v}`)) : null;
+  const commit = text ? (R.write(PLAN, text.replace(/^(\*\*Status\*\* · .*?)\s*$/m, (_, l) => `${l.replace(/ · STOPPED .* · [0-9a-f]{7,40}$/, '')} · RESUMED ${v}`)), commitPush(R, TRANCHE, [PLAN], `plan: RESUMED at ${v}`)) : null;
   return { resumed: v, state: stateCommit, commit };
 }
 
@@ -451,10 +467,15 @@ export function place(o) {
   const job = jobLines(R, e).find((j) => j.module === m.id && j.session && LIVE.test(j.state));
   if (job) {
     const message = `CHANGE: an entry placed in your job (P10):\n${entry}`;
+    // the entry also in the plan under its module, so the archive, the report and the close's check see it (R2, R7)
+    R.write(PLAN, checkedNew(R, text, withEntry(text, m.layer, m.id, entry), PLAN));
+    const planCommit = commitPush(R, TRANCHE, [PLAN], `plan ${T}: ${entry.slice(2, 40)} placed in ${m.id}'s running job`);
     const commit = stateWrite(R, { [`jobs/${m.id}/start.md`]: `${stateRead(R, `jobs/${m.id}/start.md`, e) || ''}\n${message}\n` }, `${m.id}: an entry placed in its running job`, e);
-    return { where: 'running job', module: m.id, commit, send: { session_id: job.session, message } };
+    return { where: 'running job', module: m.id, commit, planCommit, send: { session_id: job.session, message } };
   }
-  if (!plan.layers[m.layer]) {
+  // a layer not started in this tranche: not in this round, nor in any archived round of it
+  const ran = !!plan.layers[m.layer] || roundFiles(R, T).some((f) => planSections(R.read(f) || '').includes(m.layer));
+  if (!ran) {
     R.write(PLAN, checkedNew(R, text, withEntry(text, m.layer, m.id, entry), PLAN));
     return { where: 'start', layer: m.layer, file: PLAN, commit: commitPush(R, TRANCHE, [PLAN], `plan ${T}: ${entry.slice(2, 40)} placed in ${m.id}'s START (layer ${m.layer}, not started)`) };
   }
@@ -530,12 +551,12 @@ export function report(o) {
   const perJob = {}; for (const c of rows.filter((x) => x[1] === 'job')) perJob[c[3]] = (perJob[c[3]] || 0) + 1;
   const jobsRun = Object.keys(perJob).length, sessions = Object.values(perJob).reduce((a, x) => a + x, 0);
   const restarts = Object.values(perJob).reduce((a, x) => a + Math.max(0, x - 1), 0) + Math.max(0, rows.filter((c) => /^BOB/.test(c[1])).length - 1);
-  // gate runs per merged job: the gate runs on every push of a job's branch; git holds the commits each merge brought in
-  const gate = {};
-  for (const l of R.g(['log', '--merges', '--format=%H %s', range]).split('\n').filter(Boolean)) {
-    const [h, ...s] = l.split(' '), mm = s.join(' ').match(/\bjob\/([a-z0-9-]+)\b/);
-    if (mm) gate[mm[1]] = (gate[mm[1]] || 0) + Number(R.g(['rev-list', '--count', '--no-merges', `${h}^1..${h}^2`]) || 0);
-  }
+  // gate runs per merged job: read from the gate's recorded runs (o.gateRuns, { <module>: <runs> }, as its caller read them
+  // from the CI's run list) for the jobs merged; the product's git holds no record of them, so without it they are
+  // unmeasured, never counted from commits (P14)
+  const given = typeof o.gateRuns === 'string' ? (() => { try { return JSON.parse(o.gateRuns); } catch { return refuse('--gate-runs \'{"<module>": <runs>, …}\' (JSON, as read from the CI\'s run list)'); } })() : o.gateRuns;
+  const gate = given && typeof given === 'object' ? Object.fromEntries([...merged].filter((m) => Number.isInteger(given[m]) && given[m] >= 0).map((m) => [m, given[m]])) : {};
+  const gateUnmeasured = [...merged].filter((m) => !(m in gate));
   const fp = footprint({ product: o.product });
   const commitsByPurpose = { 'job code': fp.kinds.product, records: fp.kinds['build state'] + fp.kinds.docs, merges: fp.merges };
   // stages run for the first time under this version (INT-5): not named in an earlier report under the same pin
@@ -550,7 +571,7 @@ export function report(o) {
     deferred: deferred.map((x) => ({ id: x.id, module: x.module, reason: x.deferred })),
     left: { notApplied: notApplied.map((x) => x.id), completion: completion.map((x) => x.id), nextTranche: next.length },
     cost: { tokens: total, byRole, unmeasured },
-    overhead: { commitsByPurpose, sessionsPerJob: jobsRun ? Math.round((10 * sessions) / jobsRun) / 10 : null, gateRunsPerMergedJob: Object.keys(gate).length ? Math.round((10 * Object.values(gate).reduce((a, x) => a + x, 0)) / Object.keys(gate).length) / 10 : null, restarts, tokensByRole: byRole, share: pct(total - jobTokens, total) },
+    overhead: { commitsByPurpose, sessionsPerJob: jobsRun ? Math.round((10 * sessions) / jobsRun) / 10 : null, gateRunsPerMergedJob: Object.keys(gate).length ? Math.round((10 * Object.values(gate).reduce((a, x) => a + x, 0)) / Object.keys(gate).length) / 10 : null, gateUnmeasured, restarts, tokensByRole: byRole, share: pct(total - jobTokens, total) },
     stages: ran, firstRuns,
   };
   const text = [
@@ -561,7 +582,7 @@ export function report(o) {
     `**Deferred** · ${fields.deferred.map((x) => `${x.id} (${x.module}): ${x.reason}`).join('; ') || 'none'}`,
     `**Left** · not applied: ${fields.left.notApplied.join(', ') || 'none'}; the completion round: ${fields.left.completion.join(', ') || 'none'}; the next tranche's list: ${fields.left.nextTranche} entries`,
     `**Cost** · ${total} tokens${Object.keys(byRole).length ? ` (${Object.entries(byRole).map(([r, t]) => `${r} ${t}`).join(', ')})` : ''}${unmeasured.length ? `; unmeasured: ${unmeasured.join(', ')}` : ''}`,
-    `**Overhead** · ${fields.overhead.share} of the tokens outside job sessions; commits: ${commitsByPurpose['job code']} job code, ${commitsByPurpose.records} records, ${commitsByPurpose.merges} merges; ${fields.overhead.sessionsPerJob ?? 'unknown'} sessions per job; ${fields.overhead.gateRunsPerMergedJob ?? 'unknown'} gate runs per merged job (its branch's commits); ${restarts} restarts`,
+    `**Overhead** · ${fields.overhead.share} of the tokens outside job sessions; commits: ${commitsByPurpose['job code']} job code, ${commitsByPurpose.records} records, ${commitsByPurpose.merges} merges; ${fields.overhead.sessionsPerJob ?? 'unknown'} sessions per job; ${fields.overhead.gateRunsPerMergedJob === null ? 'gate runs per merged job unmeasured (the gate\'s runs not given)' : `${fields.overhead.gateRunsPerMergedJob} gate runs per merged job (the gate's recorded runs)${gateUnmeasured.length ? `; unmeasured for ${gateUnmeasured.join(', ')}` : ''}`}; ${restarts} restarts`,
     `**Stages** · ${ran.join(', ') || 'none'}`,
     `**First runs under this version** · ${firstRuns.join(', ') || 'none'}`,
     '', '## Entries', '', '| entry | layer | module | outcome |', '| --- | --- | --- | --- |',

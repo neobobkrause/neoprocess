@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import * as P from '../planning.mjs';
@@ -103,6 +103,10 @@ test('R2 trancheClose only when every round is archived and every job merged: ma
   put(p.dir, P.completionFile('T1'), planText('T1', [[1, [['alpha', 'T1-8', 'XYZ-1']]]], { title: '# Plan: the completion round · T1' })); commitPush(p.R, TRANCHE, [P.completionFile('T1')], 'a completion entry');
   await assert.rejects(P.trancheClose(p.o(), CLOSE), /the completion round is not run: build\/plan\/T1-completion\.md exists/);
   rmSync(join(p.dir, P.completionFile('T1'))); commitPush(p.R, TRANCHE, [P.completionFile('T1')], 'the entry moved for this test');
+  // a next.md titled for this tranche: a round of it waits
+  put(p.dir, P.NEXT, planText('T1', [[1, [['alpha', 'T1-8', 'XYZ-1']]]])); commitPush(p.R, TRANCHE, [P.NEXT], 'a round waits');
+  await assert.rejects(P.trancheClose(p.o(), CLOSE), /a round of T1 waits: build\/plan\/next\.md is titled for this tranche/);
+  rmSync(join(p.dir, P.NEXT)); commitPush(p.R, TRANCHE, [P.NEXT], 'moved for this test');
   await assert.rejects(P.trancheClose(p.o(), { ...CLOSE, asks: () => ['A1'] }), /asks still open: A1/);
   await assert.rejects(P.trancheClose(p.o(), CLOSE), /entries whose module's job is not merged: beta \(T1-2\)/);
   mergeJob(p, 'beta', 4);
@@ -143,6 +147,8 @@ test('R3 roundOpen copies a round\'s entries whole, grouped by module under thei
   put(p.dir, 'build/plan/r2.md', planText('T1', [[1, [['alpha', 'T1-3', 'XYZ-1']]]]));
   assert.throws(() => P.roundOpen(p.o({ planFile: 'build/plan/r2.md' })), /a round is running: layer\(s\) 1, 2/);
   planEdit(p.R, (q) => ({ ...q, layers: { 1: 'CLOSED', 2: 'CLOSED' } }), 'layers run');
+  // the round is open until its plan is archived, whatever its layers read
+  assert.throws(() => P.roundOpen(p.o({ planFile: 'build/plan/r2.md' })), /a round is running: its layers are closed but build\/plan\/current\.md is not archived/);
   // the completion round's file wins over a next.md that is the next tranche's list, which stays
   put(p.dir, P.NEXT, planText('T2', [[1, [['alpha', 'T2-1', 'XYZ-1']]]]));
   put(p.dir, P.completionFile('T1'), planText('T1', [[2, [['beta', 'T1-9', 'XYZ-2']]]], { title: '# Plan: the completion round · T1' }));
@@ -160,10 +166,13 @@ test('R3 roundOpen copies a round\'s entries whole, grouped by module under thei
   assert.throws(() => P.roundOpen(p.o({ planFile: 'build/plan/r3.md' })), /entry T1-4 is under no module group/);
   put(p.dir, 'build/plan/r3.md', planText('T1', [[1, [['beta', 'T1-4', 'XYZ-2']]]])); commitPush(p.R, TRANCHE, ['build/plan/r3.md'], 'r3');
   assert.throws(() => P.roundOpen(p.o({ planFile: 'build/plan/r3.md' })), /T1-4: beta is in layer 2, not 1/);
-  put(p.dir, 'build/plan/r3.md', planText('T1', [[1, [['alpha', 'T1-4', 'XYZ-1']]]])); commitPush(p.R, TRANCHE, ['build/plan/r3.md'], 'r3');
+  // a round's plan naming another pin: the tranche's Status line and its pin are kept (only resume moves the pin, R5)
+  put(p.dir, 'build/plan/r3.md', planText('T1', [[1, [['alpha', 'T1-4', 'XYZ-1']]]], { pin: 'fff9999' })); commitPush(p.R, TRANCHE, ['build/plan/r3.md'], 'r3');
   const ro = P.roundOpen(p.o({ planFile: 'build/plan/r3.md' }));
   assert.deepEqual([ro.tranche, ro.round, ro.layers], ['T1', 3, [1]]);
-  assert.equal(readFileSync(join(p.dir, P.PLAN), 'utf8'), readFileSync(join(p.dir, 'build/plan/r3.md'), 'utf8'));
+  const cur3 = readFileSync(join(p.dir, P.PLAN), 'utf8');
+  assert.equal(cur3, readFileSync(join(p.dir, 'build/plan/r3.md'), 'utf8').replace('pinned at `fff9999`', 'pinned at `abc1234`'));
+  assert.equal(status({ product: p.dir, role: 'bob' }).pin, 'abc1234');
   // a round's plan over the limit is two rounds (SESSIONS §6.3)
   assert.deepEqual(P.planFindings(null, planText('T1', [[1, [['alpha', 'T1-6', `XYZ-1 ${'x'.repeat(P.PLAN_LIMIT)}`]]]])).filter((x) => /limit/.test(x)).length, 1);
 });
@@ -179,6 +188,17 @@ test('R3 the completion round opens by --completion after the last round, needin
   assert.deepEqual([ro.round, ro.from], [2, P.completionFile('T1')]);
   assert.equal(existsSync(join(p.dir, P.completionFile('T1'))), false);
   assert.match(p.g('log', '-1', '--format=%s'), /round R2 opens \(the completion round\)/);
+  // round close with no --next: a next.md titled for this tranche is its next round, before the completion round (PLN-4)
+  planEdit(p.R, (q) => ({ ...q, layers: { 1: 'CLOSED' } }), 'layer 1 run');
+  put(p.dir, P.NEXT, planText('T1', [[2, [['beta', 'T1-6', 'XYZ-2']]]], { pin: 'fff9999' }));
+  put(p.dir, P.completionFile('T1'), planText('T1', [[1, [['alpha', 'T1-7', 'XYZ-1']]]], { title: '# Plan: the completion round · T1' }));
+  commitPush(p.R, TRANCHE, [P.NEXT, P.completionFile('T1')], 'a next round; a completion entry');
+  const rc = P.roundClose(p.o());
+  assert.deepEqual([rc.round, rc.next, rc.completion], [2, P.NEXT, false]);
+  assert.match(readFileSync(join(p.dir, P.PLAN), 'utf8'), /pinned at `abc1234`/);   // the pin kept through round close
+  planEdit(p.R, (q) => ({ ...q, layers: { 2: 'CLOSED' } }), 'layer 2 run');
+  assert.equal(P.roundClose(p.o()).next, P.completionFile('T1'));
+  assert.equal(existsSync(join(p.dir, P.completionFile('T1'))), false);
 });
 
 test('R4 partial records a layer started in part, its modules and the architecture session\'s reason, in the plan; the rest start once it has merged', async () => {
@@ -215,14 +235,16 @@ test('R5 stop records once, by the architecture session, at the pin, each unmerg
     const st = status({ product: p.dir, role });
     assert.deepEqual([st.stop.why, st.stop.version, st.stop.choices], ['the gate refuses every extraction', 'abc1234', { alpha: 'complete-allowed' }]);
   }
-  assert.match(readFileSync(join(p.dir, P.PLAN), 'utf8'), /^\*\*Status\*\* · .* STOPPED \S+ by the architecture session: the gate refuses every extraction at `abc1234` \(alpha complete-allowed\)\.$/m);
+  assert.match(readFileSync(join(p.dir, P.PLAN), 'utf8'), /^\*\*Status\*\* · OPEN · the process pinned at `abc1234`\. · STOPPED the gate refuses every extraction · abc1234$/m);   // exactly the form
+  assert.match(stateRead(p.R, 'plan.md'), /^\*\*Status\*\* · OPEN · BOB #1 · \S+ · STOPPED the gate refuses every extraction · abc1234 · choices alpha complete-allowed$/m);
   assert.throws(() => P.resume(p.o({ version: 'main' })), /--version/);
   const r = P.resume(p.o({ version: 'def5678' }));
   assert.equal(r.resumed, 'def5678');
   const st = status({ product: p.dir, role: 'job' });
   assert.deepEqual([st.stop, st.resumed, st.pin], [null, 'def5678', 'def5678']);
-  // the durable plan carries the move, so the pin outlives the epoch; nothing else moves it
-  assert.equal(pinOf(readFileSync(join(p.dir, P.PLAN), 'utf8').match(/^\*\*Status\*\* · .*$/m)[0], null), 'def5678');
+  // the durable plan's Status line carries the resume in the same form; the stop is cleared from it
+  assert.match(readFileSync(join(p.dir, P.PLAN), 'utf8'), /^\*\*Status\*\* · OPEN · the process pinned at `abc1234`\. · RESUMED def5678$/m);
+  assert.equal(pinOf(null, parsePlan(stateRead(p.R, 'plan.md'))), 'def5678');
   assert.throws(() => P.resume(p.o({ version: '0123abc' })), /not stopped/);
 });
 
@@ -238,11 +260,12 @@ test('R6 place puts work found while a round runs at once: the running job as a 
   assert.deepEqual([a.where, a.send.session_id], ['running job', J1]);
   assert.match(a.send.message, /^CHANGE: an entry placed in your job \(P10\):\n- T1-10 · XYZ-1: a gap found\.$/);
   assert.match(stateRead(p.R, 'jobs/alpha/start.md'), /- T1-10 · XYZ-1: a gap found\./);
+  assert.deepEqual(P.entries(readFileSync(join(p.dir, P.PLAN), 'utf8')).filter((e) => e.id === 'T1-10').map((e) => [e.layer, e.module]), [[1, 'alpha']]);   // in the plan too: the archive, report and close see it
   // a layer not started: its START, the plan's entries (the layer's section made in order)
   const c = P.place(p.o({ module: 'gamma', entry: '- T1-11 · XYZ-3: found early.' }));
   assert.deepEqual([c.where, c.layer], ['start', 2]);
   const plan = readFileSync(join(p.dir, P.PLAN), 'utf8');
-  assert.deepEqual(P.entries(plan).map((e) => [e.id, e.layer, e.module]), [['T1-1', 1, 'alpha'], ['T1-2', 1, 'beta'], ['T1-11', 2, 'gamma']]);
+  assert.deepEqual(P.entries(plan).map((e) => [e.id, e.layer, e.module]), [['T1-1', 1, 'alpha'], ['T1-10', 1, 'alpha'], ['T1-2', 1, 'beta'], ['T1-11', 2, 'gamma']]);
   assert.throws(() => P.place(p.o({ module: 'gamma', entry: '- T1-12 · XYZ-7: cites another module\'s id.' })), /T1-12: cites XYZ-7/);
   // a started layer whose job is not running: the completion round
   const b = P.place(p.o({ module: 'beta', entry: '- T1-13 · XYZ-2: found late.' }));
@@ -258,6 +281,18 @@ test('R6 place puts work found while a round runs at once: the running job as a 
   assert.match(readFileSync(join(p.dir, P.NEXT), 'utf8'), /^- T1-15 · XYZ-2: needs a deployed copy\. · hard reason: a measurement/m);   // as the format check reads it (rulebook PLN 2)
   // a hard reason that is none of P19's is a finding of the plan's check
   assert.deepEqual(P.planFindings(null, planText('T1', [[1, [['alpha', 'T1-1', 'XYZ-1']]]]).replace('make alpha.', 'make alpha. · hard reason: too big')), ['T1-1: its hard reason "too big" is none of P19\'s: Bob\'s decision, a deployment or a measurement that cannot happen inside the tranche, something outside the product']);
+});
+
+test('R6 a layer started in an earlier round of the tranche is started: its module\'s found work goes to the completion round', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'planning-'));
+  const p = product(base, 'a', TWO, planText('T1', [[1, [['alpha', 'T1-1', 'XYZ-1']]]]));
+  await P.trancheOpen(p.o()); epochOpen(p.o()); asBob(p, { 1: 'CLOSED' });
+  jobLine(p, 'alpha', 'ARCHIVED', 3);
+  put(p.dir, P.NEXT, planText('T1', [[2, [['beta', 'T1-2', 'XYZ-2']]]])); commitPush(p.R, TRANCHE, [P.NEXT], 'round 2');
+  assert.equal(P.roundClose(p.o()).next, P.NEXT);   // round 2 runs layer 2 only; its plan names no layer 1
+  const r = P.place(p.o({ module: 'alpha', entry: '- T1-3 · XYZ-1: found in round 2.' }));
+  assert.deepEqual([r.where, r.file], ['completion round', P.completionFile('T1')]);
+  assert.equal(P.place(p.o({ module: 'beta', entry: '- T1-4 · XYZ-2: before layer 2 starts.' })).where, 'start');
 });
 
 test('R7 report states elapsed time, work finished, each deferred entry with its reason, work left, cost, the overhead (commits by purpose, sessions per job, gate runs per merged job, restarts, tokens by role) and the stages run for the first time under a version', async () => {
@@ -286,7 +321,11 @@ test('R7 report states elapsed time, work finished, each deferred entry with its
   assert.deepEqual(r.entries.map((e) => [e.id, e.outcome]), [['T1-1', 'applied'], ['T1-2', "deferred: Bob's decision on the layer"]]);
   assert.deepEqual(r.left, { notApplied: [], completion: [], nextTranche: 1 });
   assert.deepEqual(r.cost, { tokens: 200, byRole: { job: 150, BOB: 50 }, unmeasured: ['BETA #1 (session_01X)'] });
-  assert.deepEqual([r.overhead.sessionsPerJob, r.overhead.gateRunsPerMergedJob, r.overhead.restarts, r.overhead.share], [1.5, 2, 1, '25 %']);
+  assert.deepEqual([r.overhead.sessionsPerJob, r.overhead.gateRunsPerMergedJob, r.overhead.gateUnmeasured, r.overhead.restarts, r.overhead.share], [1.5, null, ['alpha'], 1, '25 %']);
+  assert.match(r.text, /gate runs per merged job unmeasured \(the gate's runs not given\)/);   // never counted from commits (P14)
+  const rg = P.report(p.o({ tranche: 'T1', gateRuns: { alpha: 3, beta: 9 } }));   // beta's job did not merge: not counted
+  assert.deepEqual([rg.overhead.gateRunsPerMergedJob, rg.overhead.gateUnmeasured], [3, []]);
+  assert.equal(P.report(p.o({ tranche: 'T1', gateRuns: '{"alpha": 4}' })).overhead.gateRunsPerMergedJob, 4);   // as the command line gives it
   assert.ok(r.overhead.commitsByPurpose['job code'] >= 2 && r.overhead.commitsByPurpose.records >= 1 && r.overhead.commitsByPurpose.merges === 1);
   assert.deepEqual([r.stages, r.firstRuns], [['tranche close'], ['tranche close']]);
   for (const k of ['Elapsed', 'Finished', 'Deferred', 'Left', 'Cost', 'Overhead', 'Stages', 'First runs under this version']) assert.match(r.text, new RegExp(`^\\*\\*${k}\\*\\* · `, 'm'));
@@ -337,6 +376,11 @@ test('R9 no function reads or writes outside the product\'s own repository: two 
   assert.throws(() => P.roundClose(a.o({ next: '../b-bob/build/plan/current.md' })), /outside the product's repository|layer\(s\)/);
   assert.throws(() => P.within(a.R, '../b-bob/x'), /outside the product's repository/);
   assert.equal(P.within(a.R, 'build/x.md'), 'build/x.md');
+  // a link in the product pointing outside it is outside (its real path is compared)
+  symlinkSync(b.dir, join(a.dir, 'build/elsewhere'));
+  assert.throws(() => P.within(a.R, 'build/elsewhere/build/plan/current.md'), /outside the product's repository/);
+  assert.throws(() => P.roundOpen(a.o({ planFile: 'build/elsewhere/build/plan/current.md' })), /outside the product's repository/);
+  rmSync(join(a.dir, 'build/elsewhere'));
   // each product's record is its own: the other's tranche, plan, rulings and state untouched
   assert.equal(existsSync(join(b.dir, 'build/rulings.md')), false);
   assert.match(readFileSync(join(b.dir, P.PLAN), 'utf8'), /^# Plan: test · T7/);
