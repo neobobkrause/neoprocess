@@ -10,6 +10,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as N from '../proc.mjs';
 import { versionCommand, processHead } from '../platform.mjs';
+import { MEASUREMENT_RULE } from '../requirements.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url)), TOY = join(HERE, '..', '..', 'dryrun');
 const B1 = 'session_01BBBBBBBBBBBBBBBBBBBBBBBB', B2 = 'session_01BBBBBBBBBBBBBBBBBBBBBBB2', J1 = 'session_01AAAAAAAAAAAAAAAAAAAAAAAA', L1 = 'session_01LLLLLLLLLLLLLLLLLLLLLLLL';
@@ -432,6 +433,7 @@ test('the job\'s life (JOB-LIFE): layer start, the job\'s turn, the gate with th
   assert.deepEqual([rv.agent.run_in_background, rv.agent.model, rv.agent.effort], [true, 'claude-sonnet-5-5', 'high']);
   assert.match(rv.agent.prompt, /^Brief review-beta · for BOB #1/); assert.match(rv.agent.prompt, /^Write your result to: .*proc-review-beta\.md$/m);
   assert.match(rv.agent.prompt, /git -C \S+ show origin\/state\/E1:jobs\/beta\/report\.md/);
+  assert.ok(rv.agent.prompt.includes(MEASUREMENT_RULE));   // the brief carries the measurement rule (requirements R4; REQ-3)
   assert.match(N.status(o()).queue.map((q) => q.item).join(';'), /^REVIEWING beta$/);
   assert.throws(() => N.merge(o({ module: 'beta' })), /not approved/);
   assert.throws(() => N.reviewResult(o({ module: 'beta', resultFile: f(w.base, 'rr0.md', 'VERDICT · gaps\n- R1 · beta/src/index.mjs:5 · x · y\n') })), /DONE line/);
