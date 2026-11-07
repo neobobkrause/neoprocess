@@ -4,5 +4,5 @@
 **Runs** · 1
 **Owed** · none
 **Model** · opus
-**Review** · review · K15: the module's one independent review; a job's whole life, the largest extraction of the layer · concerns: diff of 1364 lines (over 400); provided service changed (43 export line(s) differ) · working since 2026-11-07T07:29:12.179Z
+**Review** · review · K15: the module's one independent review; a job's whole life, the largest extraction of the layer · concerns: diff of 1364 lines (over 400); provided service changed (43 export line(s) differ) · gaps: 3 · 2026-11-07
 **Reviews** · 1
