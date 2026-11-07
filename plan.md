@@ -2,5 +2,5 @@
 
 **Status** · OPEN · BOB #3 · session_012hdw2SQeMD3yMLUC1NiuQu
 **Owed** · none
-**Layers** · 1 CLOSED; 2 CLOSED; 3 STARTED
+**Layers** · 1 CLOSED; 2 CLOSED; 3 CLOSED
 **Retiring** · BOB #3 session_012hdw2SQeMD3yMLUC1NiuQu running
