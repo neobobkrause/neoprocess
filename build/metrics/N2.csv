@@ -9,3 +9,4 @@ session_012hdw2TSPK1pQS5pvLinrn7,job,ARCHITECTURE #1,architecture,46941662,74412
 ,defect,REQUIREMENTS #1,requirements,,,,,,,1/1,parse leaves a statement under a bold line it does not read as a service header in no block  with no finding (planning's report  K26; fix N2-53)
 ,defect,RECORD #2,record,,,,,,,1/1,pinOf misses the exact RESUMED <sha> and STOPPED <why> · <sha> forms once the state branch is gone (planning's report  K30; fix N2-55)
 session_012hdw2Qj3qLqne5WMmhMyGq,job,PLANNING #1,planning,39961295,634186,782,161794,3,608,1/1,attempt PLANNING #1 · reading unrecorded
+session_012hdw2SqkDQYiAtzn73PR34,job,JOBS #1,jobs,41570641,728742,1303,134581,3,668,1/1,attempt JOBS #1 · reading unrecorded
