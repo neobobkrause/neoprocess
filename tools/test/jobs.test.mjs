@@ -125,6 +125,9 @@ test('R3 job start: the first command merges the tranche in, records the role, s
   assert.deepEqual([js.name, js.pr, js.state], ['CORE #1', 11, 'WORKING']);
   assert.match(js.start, /^START CORE #1/);
   assert.ok(js.reading.bytes > 0 && js.reading.budget === J.SET_BUDGET && !js.reading.over);
+  assert.deepEqual(js.reading.sizes.map((x) => x.path), [...js.reading.files, ...js.reading.code]);
+  assert.equal(js.reading.sizes.find((x) => x.path === 'build/requirements/core.md').bytes, Buffer.byteLength(PRODUCT['build/requirements/core.md']));
+  assert.ok(js.reading.sizes.find((x) => x.path === 'core/src/').bytes > 0);
   assert.equal(g(core, 'rev-parse', '--abbrev-ref', 'HEAD'), 'job/core');
   assert.ok(existsSync(join(core, 'build/plan/notes.md')), 'the tranche is merged into the job\'s branch');
   assert.equal(g(core, 'rev-parse', 'HEAD'), g(core, 'rev-parse', 'origin/job/core'));
@@ -246,7 +249,8 @@ test('R6 job route: a live session is messaged; one gone is replaced by a succes
   assert.match(r.brief, /^ROUTE CORE #2 · continues CORE #1 \(session_01C+\) on job\/core at [0-9a-f]{7} · PR #11 · state WORKING\n/);
   assert.match(r.brief, /not a fresh reading of the module/);
   assert.match(r.brief, /^- [0-9a-f]+ core: triple$/m);
-  assert.ok(r.prompt.endsWith(r.brief));
+  assert.ok(r.prompt.endsWith(r.brief.trimEnd()));
+  assert.equal(J.jobSession(w.R, 'core', 'CORE #2', 'opus', J.routeBriefFor(w.R, 'core', 'CORE #2')).prompt, r.prompt);   // the call as the record rebuilds it
   assert.ok(Buffer.byteLength(r.brief) <= J.LIMIT);
   assert.equal(REC.stateRead(w.R, 'jobs/core/route.md'), r.brief.trimEnd());
   assert.deepEqual(REC.parsePlan(REC.stateRead(w.R, 'plan.md')).owed, ['open PR app', 'start app', 'start core']);

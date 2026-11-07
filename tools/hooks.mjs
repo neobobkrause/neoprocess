@@ -13,7 +13,8 @@
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { ROOT_BOB_FILE, repo, readRole, unpushed, status, addr, parsePlan, parseJob, stateRead, jobSession, laneSession, processSession, processTriggerReason, jobBranch, jobFiles, lanes, refusalsOf, TRANCHE, ghRepo, PROCESS, processRepo, backstopReason, ISSUE_FILE, ISSUES_FILE, BACKSTOP_FILE, ISSUE_FRESH_MIN, WORKERS_FILE, TOOKOVER_FILE, runningWorkers } from './proc.mjs';
+import { jobSession, routeBriefFor } from './jobs.mjs';
+import { ROOT_BOB_FILE, repo, readRole, unpushed, status, addr, parsePlan, parseJob, stateRead, laneSession, processSession, processTriggerReason, jobBranch, jobFiles, lanes, refusalsOf, TRANCHE, ghRepo, PROCESS, processRepo, backstopReason, ISSUE_FILE, ISSUES_FILE, BACKSTOP_FILE, ISSUE_FRESH_MIN, WORKERS_FILE, TOOKOVER_FILE, runningWorkers } from './proc.mjs';
 import { recordLocal } from './record.mjs';
 import { resolve, sep } from 'node:path';
 import { stepsReason, lastAssistantText, plainReason, BOB_READS, judgeReason, EVIDENCE_MODEL, saidPassed, SAY_HINT } from './lib.mjs';
@@ -210,7 +211,7 @@ export function preReason(role, input, ctx) {
     }
     const m = id.toLowerCase(), j = parseJob(stateRead(R, `jobs/${m}.md`) || '');
     if (!j || !plan.owed.includes(`start ${m}`)) return `no start is owed for ${m}: run \`proc layer start\` or \`proc job route\` first, and use the call it prints`;
-    const want = jobSession(R, m, title, j.model || 'opus');
+    const want = jobSession(R, m, title, j.model || 'opus', routeBriefFor(R, m, title));
     if (ti.prompt !== want.prompt || ti.source_revision !== want.source_revision) return `use the create_session \`proc\` printed for ${title}, unchanged (the goal, the standing lines, the branch ${want.source_revision})`;
   }
   return null;
