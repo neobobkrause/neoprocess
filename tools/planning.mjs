@@ -28,8 +28,11 @@ export const completionFile = (T) => `build/plan/${T}-completion.md`;
 export const reportFile = (T) => `${ARCHIVE}/${T}-report.md`;
 // The stages INT-5 names, proven at their first real run: Bob is told when one runs for the first time under a version.
 export const STAGES = ['completion round', 'tranche close', 'merge to main', 'release cut', 'deployment', 'release walk'];
-// P19's three reasons, the only ones an entry leaves the tranche for (R6; PLN-2), written `*(deferred: <reason>)*`.
-export const DEFER_REASONS = Object.freeze({ bob: "Bob's decision", measurement: 'a deployment or measurement', outside: 'outside the product' });
+// P19's three reasons, the only ones an entry leaves the tranche for (R6; PLN-2): an entry of the next tranche's list carries
+// `hard reason: <reason>`, the reason beginning as the format check reads it (`checks/format.mjs` NEXT_REASONS, rulebook
+// PLN 2; restated here, since planning does not use architecture).
+export const DEFER_REASONS = Object.freeze({ bob: "Bob's decision, not yet made", deployment: 'a deployment that cannot happen inside the tranche', measurement: 'a measurement that cannot happen inside the tranche', outside: 'outside the product: something that does not yet exist' });
+export const HARD_REASON = /^(?:Bob's|a deployment|a measurement|outside the product)/i;
 
 // ---- the product's own paths (R9; PLN-7) ----
 
@@ -64,8 +67,8 @@ export function entries(text) {
     if (g) { mod = g[1]; continue; }
     const e = l.match(/^- (\S+?) · (.*)$/);
     if (!e) continue;
-    const d = e[2].match(/\*\(deferred: (.+?)\)\*/);
-    out.push({ id: e[1], layer, module: mod, text: l, deferred: d ? d[1] : null, ids: canonIds(e[2]) });
+    const at = e[2].indexOf('hard reason: ');
+    out.push({ id: e[1], layer, module: mod, text: l, deferred: at < 0 ? null : e[2].slice(at + 'hard reason: '.length).replace(/^[*_\s]+|[*_\s]+$/g, ''), ids: canonIds(e[2]) });
   }
   return out;
 }
@@ -80,13 +83,13 @@ export function planFindings(R, text) {
   if (!planSections(t).length) f.push('the plan has no `## Layer <n>` section');
   const size = Buffer.byteLength(t, 'utf8');
   if (size > PLAN_LIMIT) f.push(`the plan is ${size} bytes; the limit is ${PLAN_LIMIT} (SESSIONS §6): a larger set is two rounds`);
-  const mods = R ? modulesOf(R) : null, reasons = Object.values(DEFER_REASONS);
+  const mods = R ? modulesOf(R) : null;
   for (const e of entries(t)) {
     if (!e.module) { f.push(`layer ${e.layer}: entry ${e.id} is under no module group (\`**<module>**\`)`); continue; }
     const m = mods?.find((x) => x.id === e.module);
     if (mods && mods.length && !m) f.push(`layer ${e.layer}: ${e.module} is no module of build/modules.json`);
     else if (m && m.layer !== e.layer) f.push(`${e.id}: ${e.module} is in layer ${m.layer}, not ${e.layer}`);
-    if (e.deferred !== null && !reasons.includes(e.deferred)) f.push(`${e.id}: deferred for "${e.deferred}"; an entry leaves the tranche only for ${reasons.map((r) => `"${r}"`).join(', ')} (P19)`);
+    if (e.deferred !== null && !HARD_REASON.test(e.deferred)) f.push(`${e.id}: its hard reason "${e.deferred.slice(0, 60)}" is none of P19's: Bob's decision, a deployment or a measurement that cannot happen inside the tranche, something outside the product`);
     const req = R && e.ids.length ? R.read(`build/requirements/${e.module}.md`) : null;
     if (req !== null && req !== undefined) {
       // every live statement's line, by the ids `parse` reads (a statement under a header parse does not read as a service
@@ -118,6 +121,7 @@ export const trancheId = (R, given) => given || (R.read(PLAN) ? tranche(R).id : 
 // needs no approval and is distinct from the next tranche's list (`next.md`).
 export function roundOpen(o) {
   const R = repo(o.product); on(R, TRANCHE);
+  if (!o.completion) within(R, o.planFile, '--plan-file');
   const cur = R.read(PLAN), plan = epoch(R) ? parsePlan(stateRead(R, 'plan.md') || '') : { layers: {} };   // a tranche opens before its epoch
   if (cur) { const open = planSections(cur).filter((l) => plan.layers[l] !== 'CLOSED'); if (open.length) refuse(`a round is running: layer(s) ${open.join(', ')} of the current plan not closed (close the round first)`); }
   const curT = cur ? tranche(R).id : archivedTranche(R);   // between rounds the archive names the tranche
@@ -142,8 +146,8 @@ export function roundClose(o) {
   const open = planSections(text).filter((l) => plan.layers[l] !== 'CLOSED');
   if (open.length) refuse(`layer(s) ${open.join(', ')} not closed`);
   if (plan.owed.length) refuse(`acts still owed: ${plan.owed.join('; ')}`);
-  const live = jobFiles(R).map((p) => [p.slice(5, -3), stateRead(R, p) || '']).filter(([, t]) => /^\*\*Status\*\* · /m.test(t) && !/^\*\*Status\*\* · .* · ARCHIVED(?: · PR #\d+)?$/m.test(t));
-  if (live.length) refuse(`jobs not archived: ${live.map(([m, t]) => `${m} ${(t.match(/^\*\*Status\*\* · \S+ #\d+ · \S+ · (.+?)(?: · PR #\d+)?$/m) || [])[1] ?? '?'}`).join('; ')}`);
+  const live = jobLines(R, needEpoch(R)).filter((j) => j.state !== 'ARCHIVED');
+  if (live.length) refuse(`jobs not archived: ${live.map((j) => `${j.module} ${j.state}`).join('; ')}`);
   const n = roundNumber(R, T), arch = `${ARCHIVE}/${T}-R${n}.md`;
   R.write(arch, text);
   const nextOf = (f) => { const t = R.read(f); return t === null ? null : { f, t }; };
@@ -287,7 +291,8 @@ export function trancheClose(o, deps = {}) {
   if (live.length) refuse(`sessions still live: ${live.join(', ')} (retire and archive them first)`);
   const T = archivedTranche(R) ?? refuse(`no round of the tranche is archived under ${ARCHIVE}/`);
   const abandoned = Object.entries(plan.stop?.choices || {}).filter(([, c]) => c === 'abandoned').map(([m]) => m);
-  const unmerged = entries(roundFiles(R, T).map((f) => R.read(f) || '').join('\n')).filter((x) => x.deferred === null && x.module && !abandoned.includes(x.module) && !mergedModules(R, T, e).has(x.module));
+  const out = new Set(entries(R.read(NEXT) || '').filter((x) => x.deferred !== null).map((x) => x.id)), done = mergedModules(R, T, e);
+  const unmerged = entries(roundFiles(R, T).map((f) => R.read(f) || '').join('\n')).filter((x) => x.module && !out.has(x.id) && !abandoned.includes(x.module) && !done.has(x.module));
   if (unmerged.length) refuse(`entries whose module's job is not merged: ${[...new Set(unmerged.map((x) => `${x.module} (${x.id})`))].join(', ')}`);
   if (unpushed(R).length) refuse(`the tranche checkout is not pushed: ${unpushed(R).join('; ')}`);
   R.fetch('main'); base(R, 'origin/main', 'HEAD');
@@ -434,7 +439,7 @@ export function place(o) {
     const reason = DEFER_REASONS[o.defer] ?? refuse(`--defer ${o.defer}: an entry leaves the tranche only for ${Object.keys(DEFER_REASONS).join(', ')} (P19: ${Object.values(DEFER_REASONS).join('; ')})`);
     const nextT = T.replace(/^([A-Z]+)(\d+)[a-z]?$/, (_, p, n) => `${p}${Number(n) + 1}`);
     const cur = R.read(NEXT) ?? `# Plan: the next tranche · ${nextT}\n\n**Status** · DRAFT.\n\n**The legacy census** · to be written.\n`;
-    R.write(NEXT, withEntry(cur, m.layer, m.id, `${entry} *(deferred: ${reason})*`));
+    R.write(NEXT, withEntry(cur, m.layer, m.id, `${entry} · hard reason: ${reason}`));
     return { where: 'next tranche', file: NEXT, reason, commit: commitPush(R, TRANCHE, [NEXT], `plan: ${entry.slice(2, 40)} deferred to the next tranche (${reason})`) };
   }
   const e = needEpoch(R), plan = parsePlan(stateRead(R, 'plan.md', e) || '');
@@ -458,13 +463,14 @@ export function place(o) {
 const csvRows = (text) => String(text || '').split('\n').slice(1).filter(Boolean).map((l) => l.split(','));
 const tokens = (c) => [4, 5, 6, 7].reduce((a, i) => a + (Number(c[i]) || 0), 0);
 // The modules whose job merged in the tranche: a merge into the tranche of `job/<m>` (GitHub's "Merge pull request #n
-// from <owner>/job/<m>", git's "Merge branch 'job/<m>'"), or the job's line reading MERGED, or ARCHIVED with merges.
+// from <owner>/job/<m>", git's "Merge branch 'job/<m>'"), or the job's line reading MERGED, or ARCHIVED (a job is retired
+// only once its work is merged, rulebook INT 8; one abandoned at a stop is named by the stop's choices).
 function mergedModules(R, T, e) {
   const out = new Set();
   let since = null; try { since = base(R, 'origin/main', 'HEAD'); } catch { /* none */ }
   const log = R.g(['log', '--merges', '--format=%s', since ? `${since}..HEAD` : 'HEAD']);
   for (const m of log.matchAll(/\bjob\/([a-z0-9-]+)\b/g)) out.add(m[1]);
-  if (e) for (const j of jobLines(R, e)) if (j.merged || (j.state === 'ARCHIVED' && j.pr)) out.add(j.module);
+  if (e) for (const j of jobLines(R, e)) if (j.merged || j.state === 'ARCHIVED') out.add(j.module);
   return out;
 }
 // The commits of the tranche since main by purpose (P14): product (code or tests), build state (`build/`), docs; merges apart.
@@ -500,9 +506,13 @@ export function report(o) {
   const texts = [...roundFiles(R, T).map((f) => R.read(f) || ''), ...(R.read(PLAN) && titleId(R.read(PLAN)) === T ? [R.read(PLAN)] : [])];
   const seen = new Map(); for (const x of entries(texts.join('\n'))) seen.set(x.id, x);
   const merged = mergedModules(R, T, e), abandoned = new Set(Object.entries(plan.stop?.choices || {}).filter(([, c]) => c === 'abandoned').map(([m]) => m));
-  const all = [...seen.values()].map((x) => ({ ...x, outcome: x.deferred !== null ? `deferred: ${x.deferred}` : abandoned.has(x.module) ? 'abandoned at the stop' : merged.has(x.module) ? 'applied' : 'not applied' }));
-  const applied = all.filter((x) => x.outcome === 'applied'), deferred = all.filter((x) => x.deferred !== null), notApplied = all.filter((x) => !['applied'].includes(x.outcome) && x.deferred === null);
   const completion = entries(R.read(completionFile(T)) || ''), next = entries(R.read(NEXT) || '');
+  // deferred: an entry on the next tranche's list with its hard reason, left out of this tranche (R6); a reason an entry of
+  // the tranche's own plan carries is why it waited before, not why it waits now
+  const out = new Map(next.filter((x) => x.deferred !== null).map((x) => [x.id, x]));
+  const all = [...seen.values()].map((x) => ({ ...x, deferred: out.get(x.id)?.deferred ?? null })).map((x) => ({ ...x, outcome: x.deferred !== null ? `deferred: ${x.deferred}` : abandoned.has(x.module) ? 'abandoned at the stop' : merged.has(x.module) ? 'applied' : 'not applied' }));
+  const applied = all.filter((x) => x.outcome === 'applied'), notApplied = all.filter((x) => x.outcome !== 'applied' && x.deferred === null);
+  const deferred = [...out.values()];
   // legacy lines removed: the net removal in the legacy modules' paths over the tranche
   const legacy = modulesOf(R).filter((m) => m.legacy).flatMap((m) => m.paths || []);
   let added = 0, removed = 0;
