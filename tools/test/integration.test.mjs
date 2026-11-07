@@ -189,6 +189,12 @@ test('R3 the layer\'s close: every pull request merged, the layer\'s tests once 
   writeFileSync(join(w.bob.dir, 'build/manifest.md'), `${readFileSync(join(w.bob.dir, 'build/manifest.md'), 'utf8')}\nLayer 1 tests: \`alpha/test/layer/*.test.mjs\`\n`);
   commitPush(w.R, TRANCHE, ['alpha/test/layer/l1.test.mjs', 'build/manifest.md'], 'layer 1 tests');
   assert.deepEqual(I.layerTests(w.R, 1), ['alpha/test/layer/*.test.mjs']); assert.deepEqual(I.layerTests(w.R, 2), []);
+  // a named path no tracked file matches refuses the close: the layer's tests cannot pass unrun
+  writeFileSync(join(w.bob.dir, 'build/manifest.md'), readFileSync(join(w.bob.dir, 'build/manifest.md'), 'utf8').replace('`alpha/test/layer/*.test.mjs`', '`alpha/test/layer/*.test.mjs`, `beta/test/layer/*.test.mjs`'));
+  commitPush(w.R, TRANCHE, ['build/manifest.md'], 'a layer test path with no file');
+  assert.throws(() => I.layerClose(o({ layer: 1 })), /names layer 1's tests `beta\/test\/layer\/\*\.test\.mjs`, and no tracked file matches it/);
+  writeFileSync(join(w.bob.dir, 'build/manifest.md'), readFileSync(join(w.bob.dir, 'build/manifest.md'), 'utf8').replace(', `beta/test/layer/*.test.mjs`', ''));
+  commitPush(w.R, TRANCHE, ['build/manifest.md'], 'the path removed');
   let refusal = ''; try { I.layerClose(o({ layer: 1 })); } catch (e) { refusal = e.message; }
   assert.match(refusal, /^layer 1's tests: 1 red over the merged layer \(alpha\); the layer stays open/);
   const changes = JSON.parse(refusal.slice(refusal.indexOf('\n') + 1));

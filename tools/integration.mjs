@@ -213,7 +213,11 @@ export function layerTests(R, L) {
 // The layer's test files: each manifest path, a glob included, as the files git tracks under it (product-relative).
 function layerFiles(R, L) {
   const out = [];
-  for (const p of layerTests(R, L)) for (const f of R.g(['ls-files', '--', R.rel(p)]).split('\n').filter(Boolean)) out.push(relative(R.dir, join(R.root, f)));
+  for (const p of layerTests(R, L)) {
+    const fs = R.g(['ls-files', '--', R.rel(p)]).split('\n').filter(Boolean);
+    if (!fs.length) refuse(`build/manifest.md names layer ${L}'s tests \`${p}\`, and no tracked file matches it: the layer's tests cannot pass unrun`);
+    for (const f of fs) out.push(relative(R.dir, join(R.root, f)));
+  }
   return [...new Set(out)];
 }
 // Each layer test file run on its own, so a red is known by its file, and the file by its owner in the module map.
