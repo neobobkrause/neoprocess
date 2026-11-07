@@ -68,7 +68,7 @@
 
 **sessions**
 - N2-30 · SES-1, SES-2, SES-3: `tools/sessions.mjs` takes takeover, handoff (at most one screen, generated), root start/bob, lane open/started/start/state/charter/route/close/archived, bobArchived, the models table; `status` prints the context share from `get_session` and REFRESH when past the role's threshold; no successor is started by its predecessor (the lane's self-spawn `processHandoff` → a handoff file for Bob's or the starter's `create_session`).
-- N2-31 · SES-4, SES-5: each role's reading set with sizes at start; budgets as fractions of the window in one table.
+- N2-31 · SES-4, SES-5: each role's reading set with sizes at start; budgets as fractions of the window in one table The table is { window, fraction, bytesPerToken } per role (K19: a job 0.15 of a 1,000,000 window at 3 bytes a token until measured); bytesPerToken is measured from a sample of sessions' reads against their token counts and the measured figure replaces 3.
 - N2-32 · SES-9, REC-8: `audit reads --layer <n>` reads a sample of the layer's job transcripts (`list_events`) for one whole read of the requirements file before the first write, and files a flaw report on a miss.
 - N2-33 · SES-10, SES-13: usage by a route PLT-3 allows (measured first: `list_events` usage fields, or `get_session`), else unmeasured; nothing counts on a parent being alive.
 - N2-34 · the process's own architecture session (MNT-9): `process start`, `process handoff`, `process archived` reduced to: record the role, print the handoff, write the START file for Bob's `create_session`; the owed archive, backstop and address-announce acts removed.
