@@ -5,3 +5,4 @@ session_01RAN5enucmXTQSLEYL3QPrK,job,PLATFORM #1,platform,,,,,6,907,1/1,unmeasur
 ,defect,,requirements,,,,,,,unknown,parse and marks count only an id leading its line; products put ids after a service's signature (architecture's review  K23; fix N2-50)
 ,defect,,proc-legacy,,,,,,,unknown,tools/test/lib.test.mjs:80 failed once inside architecture's job complete (memory peaks empty at :95) and passed 3 of 3 alone: an intermittent legacy test (7 Nov)
 session_012hdw2SRgbqwdDGPhXQvSLS,job,REQUIREMENTS #1,requirements,22716441,403167,1900,83888,2,257,1/1,
+session_012hdw2TSPK1pQS5pvLinrn7,job,ARCHITECTURE #1,architecture,46941662,744120,770,164407,4,2928,1/1,
