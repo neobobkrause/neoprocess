@@ -180,6 +180,12 @@ test('R3 the layer\'s close: every pull request merged, the layer\'s tests once 
   assert.match(changes[0].message, /^CHANGE: layer 1's tests fail at the close for alpha; fix them, then complete again:\n- alpha and beta agree on a total$/);
   assert.match(changes[0].then, /^proc job reopen --module alpha --change-file/);
   assert.equal(line(w, 'alpha').state, 'MERGED');   // the jobs stay live until the close
+  // a job retired before the close (jobs' early retirement) cannot be re-opened: its CHANGE starts a new job instead
+  const merged = line(w, 'alpha');
+  stateWrite(w.R, { 'jobs/alpha.md': fmtJob('alpha', { ...merged, state: 'ARCHIVED' }) }, 'alpha retired early');
+  let r2 = ''; try { I.layerClose(o({ layer: 1 })); } catch (e) { r2 = e.message; }
+  assert.match(JSON.parse(r2.slice(r2.indexOf('\n') + 1))[0].then, /^alpha's job is retired: start a new one on this CHANGE \(proc layer start --layer 1 --modules alpha\)$/);
+  stateWrite(w.R, { 'jobs/alpha.md': fmtJob('alpha', merged) }, 'alpha merged again (the fixture)');
   // the fix is merged: the layer closes; the stale rows of platform's table listed; each job retired on the record
   writeFileSync(join(w.bob.dir, 'alpha/test/layer/l1.test.mjs'), "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { sum } from '../../src/index.mjs';\ntest('alpha and beta agree on a total', () => { assert.equal(sum([1, 2]), 3); });\n");
   commitPush(w.R, TRANCHE, ['alpha/test/layer/l1.test.mjs'], 'layer 1 tests fixed');

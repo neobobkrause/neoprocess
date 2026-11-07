@@ -1,8 +1,9 @@
 // integration (layer 3; build/requirements/integration.md): work counts only when it is merged and proven. The review
 // decision and its worker (R1), the merge of a green current tip and its record (R2), the layer's close with its tests
 // (R3), the close pull request as the one thing that moves `main` (R4), retirement, a BOB's release and a defect as
-// record lines and rows (R5; a job's retirement is jobs' command, named here at a layer's close). Nothing here archives, re-arms, deletes or interrupts a session, or prints one as owed
-// (R6); every act it prints is the architecture session's, never Bob's (R7).
+// record lines and rows (R5; a job's retirement is jobs' command, named here at a layer's close). Nothing here archives,
+// re-arms, deletes or interrupts a session, or prints one as owed (R6); every act it prints is the architecture session's,
+// never Bob's (R7).
 //
 // K24: integration imports planning, jobs and gate, each merged before it (planning 021a6ff, jobs 2065a39, gate 7337ea3).
 import { spawnSync } from 'node:child_process';
@@ -240,7 +241,7 @@ export function layerClose(o) {
   if (tests.failed.length) {
     const by = new Map();
     for (const t of tests.failed) { const x = ownerOf(R, L, t, files) ?? 'unplaced'; (by.get(x) ?? by.set(x, []).get(x)).push(t); }
-    const changes = [...by].map(([x, ts]) => { const j = jobs.find(([y]) => y === x)?.[1]; return { module: x, session: j?.session ?? null, message: `CHANGE: layer ${L}'s tests fail at the close for ${x}; fix them, then complete again:\n${ts.map((t) => `- ${t}`).join('\n')}`, then: x === 'unplaced' ? 'name the module these tests prove, then send it the CHANGE' : `proc job reopen --module ${x} --change-file <this message>, then send it` }; });
+    const changes = [...by].map(([x, ts]) => { const j = jobs.find(([y]) => y === x)?.[1]; return { module: x, session: j?.session ?? null, message: `CHANGE: layer ${L}'s tests fail at the close for ${x}; fix them, then complete again:\n${ts.map((t) => `- ${t}`).join('\n')}`, then: x === 'unplaced' ? 'name the module these tests prove, then send it the CHANGE' : j?.state === 'MERGED' ? `proc job reopen --module ${x} --change-file <this message>, then send it` : `${x}'s job is retired: start a new one on this CHANGE (proc layer start --layer ${L} --modules ${x})` }; });
     refuse(`layer ${L}'s tests: ${tests.failed.length} red over the merged layer (${[...by.keys()].join(', ')}); the layer stays open:\n${JSON.stringify(changes, null, 2)}`);
   }
   const sh = (c) => spawnSync('sh', ['-c', c], { cwd: R.dir, encoding: 'utf8' }), list = artifacts(R), stale = [];
