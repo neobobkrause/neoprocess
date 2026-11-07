@@ -53,7 +53,7 @@
 //   xdone   --as <NAME> --from <NAME> --through <L><n>   move my cursor over theirs (never back)
 //   xcheck  --as <NAME>                                  for each correspondent: what I have not read, and they of mine;
 //           as BOB, with --tranche or a plan in the working tree, a WARNING when my Writer is not the plan's BOB
-import { execFileSync } from 'node:child_process';
+import { repo as recordRepo } from './record.mjs';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname, relative, resolve } from 'node:path';
@@ -102,11 +102,11 @@ export const runningUntil = (state) => { const m = /^RUNNING until (\S+)/.exec(s
 // ---- git ----
 
 function repo(product) {
-  const dir = resolve(product || '.');
-  const root = execFileSync('git', ['-C', dir, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
-  const g = (args, opts = {}) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: opts.quiet ? ['ignore', 'pipe', 'ignore'] : undefined, maxBuffer: 64 << 20 });
+  // git only through the record's repo (record R1); `g` keeps this tool's untrimmed output
+  const dir = resolve(product || '.'), RR = recordRepo(dir), root = RR.root;
+  const g = (args) => RR.raw(args);
   const inRepo = (p) => relative(root, join(dir, p));
-  return { dir, root, g, inRepo };
+  return { dir, root, g, inRepo, RR };
 }
 function fetchBranch(R, branch) {
   try { R.g(['fetch', '-q', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`], { quiet: true }); return true; } catch { return false; }
@@ -478,14 +478,14 @@ function remoteHas(R, branch) {
 // origin/<branch> does not), else, before the first read, the remote-tracking ref. A tip that does not descend from it
 // is a forced rewrite (§13.1 cl.1): every reader refuses it, and the ref stays put, so each later read refuses too.
 export const seenRef = (branch) => `refs/mail-seen/${branch}`;
-const revq = (root, ref) => { try { return execFileSync('git', ['-C', root, 'rev-parse', '-q', '--verify', `${ref}^{commit}`], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim() || null; } catch { return null; } };
+const revq = (root, ref) => { try { return recordRepo(root).g(['rev-parse', '-q', '--verify', `${ref}^{commit}`]) || null; } catch { return null; } };
 export const lastSeen = (root, branch) => revq(root, seenRef(branch)) || revq(root, `refs/remotes/origin/${branch}`);
 export function rewriteFault(root, branch, before, tip) {
   if (!before || !tip || before === tip) return null;
-  try { execFileSync('git', ['-C', root, 'merge-base', '--is-ancestor', before, tip], { stdio: 'ignore' }); return null; }
+  try { recordRepo(root).g(['merge-base', '--is-ancestor', before, tip]); return null; }
   catch { return `${branch}: history rewritten: ${before.slice(0, 7)}, read before, is not in ${tip.slice(0, 7)}`; }
 }
-export const markSeen = (root, branch, tip) => execFileSync('git', ['-C', root, 'update-ref', seenRef(branch), tip], { stdio: 'ignore' });
+export const markSeen = (root, branch, tip) => recordRepo(root).g(['update-ref', seenRef(branch), tip]);
 // A participant's outbox as pushed: its text (null before the branch exists) and the branch's tip.
 function readMail(R, p) {
   if (!remoteHas(R, p.branch)) return { text: null, tip: null };
@@ -500,7 +500,7 @@ function readMail(R, p) {
 // Commit the edited outbox onto the remote tip of its own mail branch (an orphan holding only the outbox when the
 // branch is absent) and push; never a force, never another participant's branch. A push that loses a race re-reads once.
 function writeMail(R, p, edit, message) {
-  const git = (args, opts = {}) => execFileSync('git', ['-C', R.root, ...args], { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], ...opts }).trim();
+  const git = (args, opts = {}) => R.RR.g(args, opts.env, opts.input);
   for (let attempt = 1; ; attempt++) {
     const { text, tip } = readMail(R, p);
     const next = edit(text);

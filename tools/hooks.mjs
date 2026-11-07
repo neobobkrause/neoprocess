@@ -13,7 +13,8 @@
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { ROOT_BOB_FILE, repo, readRole, unpushed, status, addr, parsePlan, parseJob, stateRead, jobSession, laneSession, processSession, processTriggerReason, REFRESH_FILE, jobBranch, jobFiles, lanes, refusalsOf, TRANCHE, ghRepo, PROCESS, processRepo, backstopReason, ISSUE_FILE, ISSUES_FILE, BACKSTOP_FILE, ISSUE_FRESH_MIN, WORKERS_FILE, TOOKOVER_FILE, runningWorkers } from './proc.mjs';
+import { ROOT_BOB_FILE, repo, readRole, unpushed, status, addr, parsePlan, parseJob, stateRead, jobSession, laneSession, processSession, processTriggerReason, jobBranch, jobFiles, lanes, refusalsOf, TRANCHE, ghRepo, PROCESS, processRepo, backstopReason, ISSUE_FILE, ISSUES_FILE, BACKSTOP_FILE, ISSUE_FRESH_MIN, WORKERS_FILE, TOOKOVER_FILE, runningWorkers } from './proc.mjs';
+import { recordLocal } from './record.mjs';
 import { resolve, sep } from 'node:path';
 import { stepsReason, lastAssistantText, plainReason, BOB_READS, judgeReason, EVIDENCE_MODEL, saidPassed, SAY_HINT } from './lib.mjs';
 import { spawnSync } from 'node:child_process';   // P20: steps for Bob verified against their source (`proc steps`)
@@ -84,7 +85,7 @@ export function issueReason(role, ti, ctx, now = Date.now()) {
 }
 // The fresh reader (rulebook SES 9; issue 61): the skill `neoprocess-reader` registers a prompt-type Stop hook, a model
 // given only the message and who Bob is. A prompt hook cannot read the role, so the skill is invoked only by the roles Bob
-// reads; the pre hook records it, and their Stop hook refuses a turn's end until it is on for the session.
+// reads; the post event records it once the call has run, and their Stop hook refuses a turn's end until it is on for the session.
 export const READER_SKILL = 'neoprocess-reader', READER_FILE = 'proc-reader.json';
 const isReader = (name) => String(name || '').replace(/^.*:/, '') === READER_SKILL;
 export function readerReason(role, ctx) {
@@ -270,7 +271,7 @@ export function stopReason(role, ctx) {
   return why.length ? why.join('; ') : null;
 }
 // The neoProcess lane's turn ends with its issues read and every one acknowledged, and its backstop due (Bob, 30 Oct). The
-// hook has no network: it reads what `proc process status` kept and what the pre hook recorded when it passed the backstop.
+// hook has no network: it reads what `proc process status` kept and what the post event recorded once the backstop was armed.
 export function laneStopReason(ctx, now = Date.now()) {
   const why = [], iss = record(ctx, ISSUES_FILE), back = record(ctx, BACKSTOP_FILE);
   if (!iss) why.push('the process issues are not read: run `proc process status`');
@@ -278,15 +279,6 @@ export function laneStopReason(ctx, now = Date.now()) {
   else { const nw = iss.issues.filter((i) => i.state !== 'ACKNOWLEDGED').map((i) => `#${i.number}`); if (nw.length) why.push(`issue(s) ${nw.join(', ')} not acknowledged: \`proc issue ack\`, the comment it prints, then \`proc process status\``); }
   const unfiled = (iss?.reports || []).filter((x) => x.state === 'NEW').map((x) => x.id);   // issue 75: a product's report not yet filed
   if (unfiled.length) why.push(`product report(s) ${unfiled.join(', ')} not filed: \`proc issue --report <id>\`, the call it prints, then \`proc process status\``);
-  const rf = record(ctx, REFRESH_FILE);   // Bob, 30 Oct: every refresh retires the predecessor and tells the products the new address
-  if (rf && rf.session === ctx.session) {
-    for (const a of rf.archives || [{ session: rf.archive }]) {   // issue 117: every earlier lane session still idle, the predecessor first
-      if ((rf.recorded || {})[a.session] || (a.session === rf.archive && rf.archived)) continue;
-      why.push(`the ${a.session === rf.archive ? 'previous' : 'earlier'} lane session ${a.session} is not archived: archive_session it, then \`proc process archived --session ${a.session} --usage '<what it returned>'\`; if the archive was refused, \`proc process archived --session ${a.session} --refused "<the refusal's words>"\` (it stays idle, owed again at the next refresh)`);
-    }
-    if (!rf.switchedOff) why.push(`the previous lane session's backstop is not switched off: list_triggers, then update_trigger enabled false on each task whose persistent_session_id is ${rf.archive}, if any`);
-    if ((rf.tell || []).length) why.push(`product BOB(s) ${rf.tell.join(', ')} not told the lane's new address: send_message each the line \`proc process start\` printed`);
-  }
   const handed = record(ctx, 'proc-handoff.json')?.session === ctx.session && ctx.session;   // handed off: the backstop is the successor's
   if (!handed && !(back && Date.parse(back.due) > now)) why.push('no backstop is due: arm it with the send_later `proc process status` printed');
   return why.length ? why.join('; ') : null;
@@ -295,8 +287,8 @@ export function laneStopReason(ctx, now = Date.now()) {
 // neoProcess #18's archive of #17 after the pre hook had already recorded it archived). PostToolUse runs only after a tool
 // completed (a denial fires PreToolUse and PermissionDenied, never it: code.claude.com/docs/en/hooks, read 30 Oct), so
 // every record of a remote act lives here: ROOT's one BOB start made, the lane's task armed or fired, its backstop due,
-// the refresh's acts (the archive, the tasks switched off, each product's BOB told), BOB's takeover reported. A refused
-// archive has its own record, `proc process archived --refused`, since nothing here ever sees it.
+// the fresh reader on, each background worker started, BOB's takeover reported. An archive is recorded by
+// `proc process archived` from what the call returned, or its refusal's words (REC-5).
 export function postRecord(role, input, ctx) {
   const t = input.tool_name, ti = input.tool_input || {}, at = new Date().toISOString(), f = (name) => join(ctx.root, '.git', name);
   const edit = (name, fn) => { let w; try { w = JSON.parse(readFileSync(f(name), 'utf8')); } catch { return null; } const n = fn(w); if (n) writeFileSync(f(name), JSON.stringify(n)); return n; };
@@ -304,12 +296,9 @@ export function postRecord(role, input, ctx) {
   if (role === 'process' && t === `${REMOTE}create_trigger`) { writeFileSync(f(PROCESS_TRIGGER_FILE), JSON.stringify({ at })); return { at }; }
   if (role === 'process' && t === `${REMOTE}fire_trigger`) return edit(PROCESS_TRIGGER_FILE, (w) => ({ ...w, fired: at }));
   if (role === 'process' && t === `${REMOTE}send_later`) { const w = { due: new Date(Date.now() + Number(ti.delay_minutes) * 60e3).toISOString() }; writeFileSync(f(BACKSTOP_FILE), JSON.stringify(w)); return w; }
-  if (role === 'process') return edit(REFRESH_FILE, (w) => {
-    if (t === `${REMOTE}archive_session` && (ti.session_id === w.archive || (w.archives || []).some((a) => a.session === ti.session_id))) return { ...w, done: { ...(w.done || {}), [ti.session_id]: at }, ...(ti.session_id === w.archive ? { archiveDone: at } : {}) };   // issue 117
-    if (t === `${REMOTE}list_triggers` || (t === `${REMOTE}update_trigger` && ti.enabled === false)) return { ...w, switchedOff: at };   // looked, and switched off what it found
-    if (t === `${REMOTE}send_message` && (w.tell || []).includes(ti.session_id)) return { ...w, tell: w.tell.filter((x) => x !== ti.session_id) };
-    return null;
-  });
+  // the fresh reader on, and a background worker started, recorded once the call has run, never by the pre event (N2-6)
+  if (t === 'Skill' && isReader(ti.skill) && ctx.session) return recordLocal(ctx.root, READER_FILE, { session: ctx.session, at });
+  if (t === 'Agent' && ti.run_in_background === true && ctx.session) return recordLocal(ctx.root, WORKERS_FILE, { session: ctx.session, at, running: [...(runningWorkers(ctx.root, ctx.session) || []), { id: input.tool_use_id, type: 'subagent', description: ti.description }] });
   if (role === 'bob' && t === `${REMOTE}send_message` && /^TOOK OVER BOB #\d+/.test(String(ti.message || ''))) return edit(TOOKOVER_FILE, (w) => ({ ...w, sent: at }));
   return null;
 }
@@ -397,8 +386,6 @@ function main() {
     let why = null; try { why = preReason(role, input, ctx); } catch (e) { why = `the check failed (${e.message}); fix the cause`; }
     if (why) { console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: `PROCESS: ${why}` } })); return; }
     let ok = null; try { ok = allowReason(role, input, ctx); } catch { /* falls through to the rules */ }
-    if (input.tool_name === 'Skill' && isReader(input.tool_input?.skill) && r.session) { try { writeFileSync(join(root, '.git', READER_FILE), JSON.stringify({ session: r.session, at: new Date().toISOString() })); } catch { /* not a git checkout */ } }
-    if (input.tool_name === 'Agent' && input.tool_input?.run_in_background === true && r.session) { try { const run = runningWorkers(root, r.session) || []; writeFileSync(join(root, '.git', WORKERS_FILE), JSON.stringify({ session: r.session, at: new Date().toISOString(), running: [...run, { id: input.tool_use_id, type: 'subagent', description: input.tool_input.description }] })); } catch { /* not a git checkout */ } }
     if (ok) console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow', permissionDecisionReason: `PROCESS: ${ok}` } }));
     return;
   }
