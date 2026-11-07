@@ -1,6 +1,6 @@
 # architecture (transient)
 
-**Status** · ARCHITECTURE #1 · session_012hdw2TSPK1pQS5pvLinrn7 · MERGED · PR #130
+**Status** · ARCHITECTURE #1 · session_012hdw2TSPK1pQS5pvLinrn7 · ARCHIVED · PR #130
 **Runs** · 2
 **Owed** · none
 **Model** · opus
