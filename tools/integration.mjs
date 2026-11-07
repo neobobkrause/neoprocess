@@ -1,12 +1,10 @@
 // integration (layer 3; build/requirements/integration.md): work counts only when it is merged and proven. The review
 // decision and its worker (R1), the merge of a green current tip and its record (R2), the layer's close with its tests
 // (R3), the close pull request as the one thing that moves `main` (R4), retirement, a BOB's release and a defect as
-// record lines and rows (R5). Nothing here archives, re-arms, deletes or interrupts a session, or prints one as owed
+// record lines and rows (R5; a job's retirement is jobs' command, named here at a layer's close). Nothing here archives, re-arms, deletes or interrupts a session, or prints one as owed
 // (R6); every act it prints is the architecture session's, never Bob's (R7).
 //
-// K24: integration imports planning, jobs and gate once each has merged, and merges after them (gate and planning merged:
-// imported). Until jobs merges, the job-line helpers it needs sit in the block marked BORROWED below, written to jobs'
-// requirements file; they are replaced by jobs' import as it merges, in this job.
+// K24: integration imports planning, jobs and gate, each merged before it (planning 021a6ff, jobs 2065a39, gate 7337ea3).
 import { spawnSync } from 'node:child_process';
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -20,6 +18,10 @@ import { readResult } from '../checks/run.mjs';
 import { PLAN, tranche, trancheId, entries, roundNumber } from './planning.mjs';
 // gate (K25): a green tip behind the tranche only by records the gate does not read for the module (gate R5).
 import { gateNeutral } from './gate.mjs';
+// jobs (K24; merged at 2065a39): the job line, what a job owes, a report's evidence, the reviewer's brief (one text with
+// the job's own review, K14), and a job's retirement (its R7), which this module names at a layer's close.
+import { parseJob, fmtJob, jobOf, owedByJob, evidenceItems, reviewBrief, MODEL, LIMIT } from './jobs.mjs';
+export { MODEL, LIMIT };
 // requirements (K25): the rule every review brief carries (requirements R4; REQ-3).
 import { MEASUREMENT_RULE } from './requirements.mjs';
 export { MEASUREMENT_RULE };
@@ -27,38 +29,17 @@ export { MEASUREMENT_RULE };
 const now = () => new Date().toISOString();
 const today = () => now().slice(0, 10);
 const SHA = /^[0-9a-f]{7,40}$/;
-export const LIMIT = 4096;                                   // a brief is one screen (SESSIONS §6)
-export const MODEL = { opus: 'claude-opus-5-5', sonnet: 'claude-sonnet-5-5' };
 export const REVIEW_REASONS = ['new module', 'provided service changed', 'sensitive path', 'large diff', 'thin evidence', 'third completion'];
 export const LARGE_DIFF = 400;                               // changed lines over which a diff is a reason to review
 export const STALE_DAYS = 7;                                 // a constraint row not confirmed for a week is listed at a layer's close
 // R6: the acts the classifier decides case by case (platform R4); nothing here prints one.
 export const NEVER = ['archive_session', 'update_trigger', 'delete_trigger', 'interrupt_session'];
 
-// ---- BORROWED until jobs merges (K24) ----
-// jobs: the job line on the state branch (jobs' "job lines"; JOB-LIFE §2).
-const JOB = /^\*\*Status\*\* · ([A-Z][A-Z0-9-]* #\d+) · (session_[0-9A-Za-z]+|-) · (.+?)(?: · PR #(\d+))?$/m;
-export function parseJob(text) {
-  const t = text || '', m = t.match(JOB); if (!m) return null;
-  const line = (k) => t.match(new RegExp(`^\\*\\*${k}\\*\\* · (.*)$`, 'm'))?.[1] ?? null;
-  return { name: m[1], session: m[2] === '-' ? null : m[2], state: m[3], pr: m[4] ? Number(m[4]) : null, runs: Number(line('Runs') || 0), owed: (line('Owed') || '').split('; ').map((x) => x.trim()).filter((x) => x && x !== 'none'), after: (line('After') || '').split(/,\s*/).filter(Boolean), model: line('Model'), review: line('Review'), merge: line('Merge'), reviews: Number(line('Reviews') || 0), merges: (line('Merges') || '').split('; ').filter(Boolean) };
-}
-export function fmtJob(m, j) {
-  let t = `# ${m} (transient)\n\n**Status** · ${j.name} · ${j.session || '-'} · ${j.state}${j.pr ? ` · PR #${j.pr}` : ''}\n**Runs** · ${j.runs || 0}\n**Owed** · ${j.owed?.length ? j.owed.join('; ') : 'none'}\n`;
-  if (j.after?.length) t += `**After** · ${j.after.join(', ')}\n`;
-  if (j.model) t += `**Model** · ${j.model}\n`;
-  if (j.review) t += `**Review** · ${j.review}\n`;
-  if (j.merge) t += `**Merge** · ${j.merge}\n`;
-  if (j.reviews) t += `**Reviews** · ${j.reviews}\n`;
-  if (j.merges?.length) t += `**Merges** · ${j.merges.join('; ')}\n`;
-  return t;
-}
 const jobPath = (m) => `jobs/${m}.md`;
-const jobOf = (R, m) => parseJob(stateRead(R, jobPath(m)) || '');
 const loadJob = (R, m) => jobOf(R, m) ?? refuse(`no job for ${m} on the state branch`);
 const saveJob = (R, m, j, msg) => stateWrite(R, { [jobPath(m)]: fmtJob(m, j) }, msg);
-// A job whose work is on the tranche: merged, or retired after its merge (R5).
-export const DONE = Object.freeze(['MERGED', 'RETIRED', 'ARCHIVED']);
+// A job whose work is on the tranche: merged, or retired after its merge (jobs' retirement writes ARCHIVED, its R7).
+export const DONE = Object.freeze(['MERGED', 'ARCHIVED']);
 const done = (R, m) => DONE.includes(jobOf(R, m)?.state);
 const modules = (R) => moduleMap(R).modules;
 const mod = (R, m) => modules(R).find((x) => x.id === m) ?? refuse(`no module ${m} in build/modules.json`);
@@ -72,23 +53,11 @@ function allChecks(R) {
   if (!res) return { fails: new Set([`check: no result written (${`${r.stdout}${r.stderr}`.trim().split('\n').pop()})`]) };
   return { fails: new Set(res.findings.map((f) => `${f.check}: ${String(f.finding).replace(/:\d+(?::\d+)?\b/g, '').trim()}`)) };
 }
-// jobs: the report's evidence items (rulebook BLD 8).
-function evidenceItems(report) {
-  const lines = String(report || '').split('\n'), i = lines.findIndex((l) => /^\*\*Evidence\*\*/.test(l));
-  if (i < 0) return null;
-  const items = [], first = lines[i].replace(/^\*\*Evidence\*\*\s*[·:]?\s*/, '').trim();
-  if (first) items.push(first);
-  for (const l of lines.slice(i + 1)) { if (/^(\*\*|#)/.test(l)) break; const t = l.replace(/^\s*(?:[-*]|\d+[.)])\s+/, '').trim(); if (t) items.push(t); }
-  return items;
-}
-// ---- end of BORROWED ----
 
 const on = (R, want) => { const b = R.branch(); if (b !== want) refuse(`check out ${want} first (on ${b})`); };
-const sized = (text, what) => { const n = Buffer.byteLength(text, 'utf8'); if (n > LIMIT) refuse(`${what} is ${n} bytes; the limit is ${LIMIT} (SESSIONS §6)`); return text; };
 const fileText = (f, what) => (typeof f === 'string' && existsSync(f) ? readFileSync(f, 'utf8').trim() : refuse(`${what}: no such file`));
 const owe = (p, acts) => ({ ...p, owed: [...new Set([...p.owed, ...acts])] });
 const clear = (p, act) => ({ ...p, owed: p.owed.filter((x) => x !== act) });
-const owedByJob = (j) => (j?.owed || []).filter((x) => !/^ready after /.test(x));
 const is = (R, a, b) => { try { R.g(['merge-base', '--is-ancestor', a, b]); return true; } catch { return false; } };
 
 // ---- R1: the review, decided by judgment and done once by a fresh worker ----
@@ -142,15 +111,7 @@ export function reviewDecide(o) {
   if (j.reviews >= 1) refuse(`${m} has had its one independent review (K15): verify the fix commits against its gaps (--verified --commits <sha,…>) or decide --no-review`);
   const model = concerns.some((c) => /^new module|^provided service|^sensitive/.test(c)) ? 'opus' : 'sonnet';
   const result = join(R.root, '.git', `proc-review-${m}.md`), { id: T } = tranche(R);
-  const brief = sized(`Brief review-${m} · for ${parsePlan(stateRead(R, 'plan.md') || '').bob?.name ?? 'BOB'} · ${today()}
-Task: Review pull request #${j.pr} of module ${m} (tranche ${T}) against the module's requirements. Report only correctness gaps against the requirements, each with the requirement id, file:line, and a way to show it (a command or a test). No style, no praise, no rewrite. ${MEASUREMENT_RULE} Why this review: ${o.reason}; ${note}.
-Read whole, and nothing else: ${R.rel(`build/requirements/${m}.md`)} (the requirements); the diff, by \`git -C ${R.root} diff origin/${TRANCHE}...origin/${jobBranch(m)}\`; the job's report, by \`git -C ${R.root} show origin/${stateBranch(needEpoch(R))}:jobs/${m}/report.md\`.
-Write your result to: ${result}
-Form of the result: first line \`VERDICT · approve\` or \`VERDICT · gaps\`; then one line per gap: \`- R<id> · <file>:<line> · <what fails> · <how to show it>\`.
-If you need something not listed above, stop and write what it is in the result; do not search for it.
-End with the line: DONE review-${m} · verdict
-Model: ${model === 'opus' ? 'Opus' : 'Sonnet'} · Effort: high · Due: 60
-`, 'the review brief');
+  const brief = reviewBrief(R, m, { by: parsePlan(stateRead(R, 'plan.md') || '').bob?.name ?? 'BOB', pr: j.pr, T, why: `${o.reason}; ${note}`, diff: `git -C ${R.root} diff origin/${TRANCHE}...origin/${jobBranch(m)}`, report: `git -C ${R.root} show origin/${stateBranch(needEpoch(R))}:jobs/${m}/report.md`, result, model });
   const commit = stateWrite(R, { [jobPath(m)]: fmtJob(m, { ...j, reviews: (j.reviews || 0) + 1, review: `review · ${o.reason} · ${note} · working since ${now()}` }), [`jobs/${m}/review-brief.md`]: brief }, `${m}: review dispatched`);
   return { commit, concerns, agent: { description: `review ${m}`, prompt: brief, run_in_background: true, model: MODEL[model], effort: 'high' }, then: `proc review result --module ${m} --result-file ${result}` };
 }
@@ -259,8 +220,8 @@ function runLayerTests(R, L, files) {
 }
 // Every pull request of the layer merged; the layer's tests once over the merged layer (a red goes back to its module's
 // job as a CHANGE, the jobs live until the close); the artifacts regenerated and committed once; the checks whole over the
-// product, judged against the tranche as it opened; platform's stale constraint rows listed; each merged job retired on
-// the record (R5); the layer CLOSED and the next layer's start printed. The proof row and the offer of a stop for a newer
+// product, judged against the tranche as it opened; platform's stale constraint rows listed; each merged job's retirement
+// named (jobs' record line, its R7; nothing owed, no session archived); the layer CLOSED and the next layer's start printed. The proof row and the offer of a stop for a newer
 // process version are maintenance's (its R3, R5; K24), wired in by its job.
 export function layerClose(o) {
   const R = repo(o.product), L = Number(o.layer); if (!L) refuse('--layer <n>');
@@ -297,10 +258,9 @@ export function layerClose(o) {
   const since = o.olderThan || new Date(Date.now() - STALE_DAYS * 864e5).toISOString().slice(0, 10);
   const staleRows = constraints({ olderThan: since }).map((r) => ({ id: r.id, date: r.date }));
   const live = jobs.filter(([, j]) => j.state === 'MERGED');
-  for (const [x, j] of live) saveJob(R, x, { ...j, state: 'RETIRED' }, `${x}: RETIRED at layer ${L}'s close`);
   const nextL = Object.keys(plan.layers).map(Number).includes(L + 1) || new RegExp(`^## Layer ${L + 1}\\b`, 'm').test(text) ? L + 1 : null;
   const pc = planEdit(R, (p) => ({ ...p, layers: { ...p.layers, [L]: 'CLOSED' } }), `layer ${L} closes`);
-  return { layer: L, commit: commit ?? pc, tests, stale: staleRows, retired: live.map(([x, j]) => ({ module: x, session: j.session, then: j.session ? `proc job archived --module ${x} --session ${j.session} --usage '<usage read by a route the platform allows>', or --unmeasured "<why none could be read>"` : null })), next: nextL ? `proc layer start --layer ${nextL}` : `proc round open (the completion round), or proc round close when nothing remains` };
+  return { layer: L, commit: commit ?? pc, tests, stale: staleRows, retire: live.map(([x, j]) => ({ module: x, session: j.session, then: `proc job retire --module ${x} [--usage '<usage read by a route the platform allows>' | --unmeasured "<why none could be read>"]` })), next: nextL ? `proc layer start --layer ${nextL}` : `proc round open (the completion round), or proc round close when nothing remains` };
 }
 function at(R, ref, fn) { const back = R.branch(), head = R.g(['rev-parse', 'HEAD']); R.g(['checkout', '-q', '--detach', ref]); try { return fn(); } finally { R.g(['checkout', '-q', back === 'HEAD' ? head : back]); } }
 
@@ -318,27 +278,6 @@ export function closeMerge(o) {
 }
 
 // ---- R5: retirement, a BOB's release and a defect, each a record line or row ----
-
-// A merged job retired early, before its layer's close, when nothing more can reach it this round: no open ask names it
-// and no running job of its layer uses it. A record line; its usage row is written by `job archived` from a route the
-// platform allows, or named unmeasured. No session is archived.
-export function jobRetire(o) {
-  const R = repo(o.product), m = o.module; if (!m) refuse('--module <m>');
-  const j = loadJob(R, m);
-  if (j.state !== 'MERGED') refuse(`${m} reads ${j.state}: a job retires merged (JOB-LIFE §8)`);
-  const open = stateListAsks(R).filter((a) => a.status !== 'CLOSED' && (a.from.toLowerCase().startsWith(`${m} #`) || new RegExp(`\\b${m}\\b`).test(a.body)));
-  if (open.length) refuse(`asks still name ${m}: ${open.map((a) => a.id).join(', ')}`);
-  const x = mod(R, m);
-  const users = modules(R).filter((y) => y.layer === x.layer && (y.uses || []).includes(m)).map((y) => [y.id, jobOf(R, y.id)]).filter(([, u]) => u && !DONE.includes(u.state));
-  if (users.length) refuse(`running jobs of the layer use ${m}: ${users.map(([id, u]) => `${id} ${u.state}`).join(', ')} (a change to a provider re-opens a user mid-layer)`);
-  const commit = saveJob(R, m, { ...j, state: 'RETIRED' }, `${m}: RETIRED`);
-  return { commit, retired: m, then: j.session ? `proc job archived --module ${m} --session ${j.session} --usage '<usage read by a route the platform allows>', or --unmeasured "<why none could be read>"` : null };
-}
-function stateListAsks(R) {
-  const e = needEpoch(R);
-  let list = []; try { R.fetch(stateBranch(e)); list = R.g(['ls-tree', '-r', '--name-only', `origin/${stateBranch(e)}`, 'asks/']).split('\n').filter(Boolean); } catch { /* none */ }
-  return list.map((p) => { const t = stateRead(R, p) || ''; return { id: p.match(/(A\d+)\.md$/)?.[1], status: t.match(/^\*\*Status\*\* · (\S+)/m)?.[1] ?? '', from: t.match(/^\*\*From\*\* · ([A-Z][A-Z0-9-]* #\d+)/m)?.[1] ?? '', body: t }; }).filter((a) => a.id);
-}
 
 // A retiring BOB released on the record once none of its workers runs (BOB, its own), or one whose session failed
 // (ROOT, from get_session). Its session is left idle, never archived from here; its usage row comes from a route the

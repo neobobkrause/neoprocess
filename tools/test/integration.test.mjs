@@ -1,6 +1,6 @@
 // tools/integration.mjs at its interface, against a real remote: a bare origin seeded with the dry run's toy product on
 // the fixed `tranche` branch, one clone as the architecture session. The job lines are written on the state branch as
-// jobs' commands leave them (K24: integration is built against jobs' requirements until jobs merges).
+// jobs' commands leave them, through jobs' own job-line writer (K24).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -13,6 +13,7 @@ import { repo, epochOpen, stateWrite, stateRead, fmtPlan, parsePlan, commitPush,
 import { constraints } from '../platform.mjs';
 import { trancheClose, trancheMerged } from '../planning.mjs';
 import { regenerate } from '../gate.mjs';
+import { parseJob, fmtJob, jobRetire, wire } from '../jobs.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url)), TOY = join(HERE, '..', '..', 'dryrun');
 const B1 = 'session_01BBBBBBBBBBBBBBBBBBBBBBBB', J1 = 'session_01AAAAAAAAAAAAAAAAAAAAAAAA', J2 = 'session_01AAAAAAAAAAAAAAAAAAAAAAA2';
@@ -52,11 +53,11 @@ function complete(w, m, { name, session, pr, change, report = '**Met** · R1\n**
   g(c.root, 'checkout', '-q', '-b', `job/${m}`);
   change(c.dir);
   g(c.root, 'add', '-A'); g(c.root, 'commit', '-q', '-m', `${m}: the change`); g(c.root, 'push', '-q', '-f', 'origin', `HEAD:refs/heads/job/${m}`);
-  stateWrite(w.R, { [`jobs/${m}.md`]: I.fmtJob(m, { name, session, state: 'COMPLETE', pr, runs, owed: [], after, model: 'opus', reviews }), [`jobs/${m}/start.md`]: `START ${name} · T1 · layer 1 · module ${m}\nEntries:\n- N1 · x\n`, [`jobs/${m}/report.md`]: report }, `${m}: COMPLETE`);
+  stateWrite(w.R, { [`jobs/${m}.md`]: fmtJob(m, { name, session, state: 'COMPLETE', pr, runs, owed: [], after, model: 'opus', reviews }), [`jobs/${m}/start.md`]: `START ${name} · T1 · layer 1 · module ${m}\nEntries:\n- N1 · x\n`, [`jobs/${m}/report.md`]: report }, `${m}: COMPLETE`);
   return c;
 }
 const append = (p, text) => (dir) => writeFileSync(join(dir, p), `${readFileSync(join(dir, p), 'utf8')}${text}`);
-const line = (w, m) => I.parseJob(stateRead(w.R, `jobs/${m}.md`));
+const line = (w, m) => parseJob(stateRead(w.R, `jobs/${m}.md`));
 // GitHub's update of a job's branch: the tranche merged in; the tip the gate then runs on.
 const ghUpdate = (w, m) => { const c = w.clone(`up-${m}-${Math.random().toString(36).slice(2, 7)}`, `job/${m}`); g(c.root, 'merge', '-q', '--no-edit', 'origin/tranche'); g(c.root, 'push', '-q', 'origin', `HEAD:job/${m}`); w.g2('fetch', '-q', 'origin'); return g(c.root, 'rev-parse', 'HEAD'); };
 // GitHub's merge of a job's pull request into the tranche, as the printed call makes it.
@@ -112,7 +113,7 @@ test('R2 the merge: only a green, current, COMPLETE, decided tip in the plan\'s 
   const w = world(), o = w.o;
   const a = complete(w, 'alpha', { name: 'ALPHA #1', session: J1, pr: 11, change: append('alpha/src/index.mjs', '// R1\n') });
   const b = complete(w, 'beta', { name: 'BETA #1', session: J2, pr: 12, change: append('beta/src/index.mjs', '// R1\n'), after: ['alpha'] });
-  stateWrite(w.R, { 'jobs/beta.md': I.fmtJob('beta', { ...line(w, 'beta'), owed: ['ready after alpha'] }) }, 'beta waits');
+  stateWrite(w.R, { 'jobs/beta.md': fmtJob('beta', { ...line(w, 'beta'), owed: ['ready after alpha'] }) }, 'beta waits');
   const ha = g(a.root, 'rev-parse', 'HEAD');
   assert.throws(() => I.merge(o({ module: 'alpha', head: ha, gate: 'success' })), /decide the review first/);
   out(I.reviewDecide(o({ module: 'alpha', noReview: true, reason: 'a comment' })));
@@ -121,9 +122,9 @@ test('R2 the merge: only a green, current, COMPLETE, decided tip in the plan\'s 
   assert.throws(() => I.merge(o({ module: 'alpha', head: ha, gate: 'failure' })), /nothing merges red/);
   assert.throws(() => I.merged(o({ module: 'alpha', sha: w.g2('rev-parse', 'HEAD') })), /is not merging/);
   // beta: owes its ready (a draft until alpha merges), and merges after alpha
-  stateWrite(w.R, { 'jobs/beta.md': I.fmtJob('beta', { ...line(w, 'beta'), owed: [], review: 'no review · x · concerns: none' }) }, 'beta ready');
+  stateWrite(w.R, { 'jobs/beta.md': fmtJob('beta', { ...line(w, 'beta'), owed: [], review: 'no review · x · concerns: none' }) }, 'beta ready');
   assert.throws(() => I.merge(o({ module: 'beta', head: g(b.root, 'rev-parse', 'HEAD'), gate: 'success' })), /merges after alpha \(the plan's order\)/);
-  stateWrite(w.R, { 'jobs/beta.md': I.fmtJob('beta', { ...line(w, 'beta'), owed: ['ready after alpha'] }) }, 'beta waits');
+  stateWrite(w.R, { 'jobs/beta.md': fmtJob('beta', { ...line(w, 'beta'), owed: ['ready after alpha'] }) }, 'beta waits');
   // the tranche moved by a record the gate does not read for alpha: the green tip merges over it
   w.g2('pull', '-q', 'origin', 'tranche');
   writeFileSync(join(w.bob.dir, 'build/plan/notes-T2.md'), '# T2, prepared ahead\n'); commitPush(w.R, TRANCHE, ['build/plan/notes-T2.md'], 'prepared ahead (P18)');
@@ -143,7 +144,7 @@ test('R2 the merge: only a green, current, COMPLETE, decided tip in the plan\'s 
   assert.deepEqual(md.ready.map((r) => [r.module, r.mark.tool, r.mark.pullNumber, r.mark.draft]), [['beta', 'update_pull_request', 12, false]]);
   assert.deepEqual(parsePlan(stateRead(w.R, 'plan.md')).owed, []);
   // beta, now behind the tranche by alpha's code: the gate must run again, so the branch is updated first
-  stateWrite(w.R, { 'jobs/beta.md': I.fmtJob('beta', { ...line(w, 'beta'), owed: [] }) }, 'beta ready');
+  stateWrite(w.R, { 'jobs/beta.md': fmtJob('beta', { ...line(w, 'beta'), owed: [] }) }, 'beta ready');
   const up = out(I.merge(o({ module: 'beta', head: g(b.root, 'rev-parse', 'HEAD'), gate: 'success' })));
   assert.deepEqual([up.update.tool, up.update.pullNumber, up.merge], ['update_pull_request_branch', 12, undefined]);
   assert.deepEqual(up.held, [{ file: 'alpha/src/index.mjs', why: "a module's code or tests" }]);
@@ -189,9 +190,9 @@ test('R3 the layer\'s close: every pull request merged, the layer\'s tests once 
   const lc = out(I.layerClose(o({ layer: 1, olderThan: '2999-01-01' })));
   assert.equal(lc.layer, 1); assert.deepEqual([lc.tests.tests, lc.tests.pass, lc.tests.failed], [1, 1, []]);
   assert.equal(lc.stale.length, constraints().length); assert.ok(lc.stale.every((r) => r.id && r.date));
-  assert.deepEqual(lc.retired.map((r) => [r.module, r.session]), [['alpha', J1], ['beta', J2]]);
-  assert.match(lc.retired[0].then, /^proc job archived --module alpha --session \S+ --usage '<usage read by a route the platform allows>', or --unmeasured/);
-  assert.deepEqual([line(w, 'alpha').state, line(w, 'beta').state], ['RETIRED', 'RETIRED']);
+  assert.deepEqual(lc.retire.map((r) => [r.module, r.session]), [['alpha', J1], ['beta', J2]]);   // each retirement named: jobs' record line (its R7)
+  assert.match(lc.retire[0].then, /^proc job retire --module alpha \[--usage '<usage read by a route the platform allows>' \| --unmeasured/);
+  assert.deepEqual([line(w, 'alpha').state, line(w, 'beta').state], ['MERGED', 'MERGED']);   // no session archived, nothing owed
   assert.equal(lc.next, 'proc layer start --layer 2');
   assert.deepEqual(parsePlan(stateRead(w.R, 'plan.md')).layers, { 1: 'CLOSED' });
   assert.deepEqual(parsePlan(stateRead(w.R, 'plan.md')).owed, []);
@@ -255,26 +256,23 @@ test('R5 retirement and a BOB\'s release are record lines; a defect is a metrics
   const w = world(), o = w.o;
   complete(w, 'alpha', { name: 'ALPHA #1', session: J1, pr: 11, change: append('alpha/src/index.mjs', '// R1\n') });
   complete(w, 'beta', { name: 'BETA #1', session: J2, pr: 12, change: append('beta/src/index.mjs', '// R1\n') });
-  assert.throws(() => I.jobRetire(o({ module: 'alpha' })), /reads COMPLETE: a job retires merged/);
   out(I.reviewDecide(o({ module: 'alpha', review: true, reason: 'new' })));
   out(I.reviewResult(o({ module: 'alpha', resultFile: f(w.base, 'ra.md', 'VERDICT · approve\nDONE review-alpha · verdict\n') })));
   w.g2('fetch', '-q', 'origin');
   out(I.merge(o({ module: 'alpha', head: w.g2('rev-parse', 'origin/job/alpha'), gate: 'success' })));
   out(I.merged(o({ module: 'alpha', sha: ghMerge(w, 'alpha', 11) })));
-  // beta, alpha's user in its layer, is still running: alpha may still be reached
-  assert.throws(() => I.jobRetire(o({ module: 'alpha' })), /running jobs of the layer use alpha: beta COMPLETE/);
-  stateWrite(w.R, { 'jobs/beta.md': I.fmtJob('beta', { ...line(w, 'beta'), state: 'MERGED' }), 'asks/A1.md': '# A1\n\n**Status** · ASKED\n**From** · ALPHA #1 · session_x\n' }, 'beta merged; an ask from alpha');
-  assert.throws(() => I.jobRetire(o({ module: 'alpha' })), /asks still name alpha: A1/);
-  stateWrite(w.R, { 'asks/A1.md': '# A1\n\n**Status** · CLOSED\n**From** · ALPHA #1 · session_x\n' }, 'A1 closed');
-  const rt = out(I.jobRetire(o({ module: 'alpha' })));
-  assert.equal(line(w, 'alpha').state, 'RETIRED'); assert.equal(line(w, 'alpha').session, J1);
-  assert.match(rt.then, /^proc job archived --module alpha --session session_01A+ --usage/);
-  assert.throws(() => I.jobRetire(o({ module: 'alpha' })), /reads RETIRED/);
+  // the retirement layer close names (jobs' command, its R7): a record line and the attempt's row, no session archived;
+  // the open asks are read by the reader its caller wires (the legacy tool's, until messages is extracted)
+  wire({ openAsks: () => [] });
+  stateWrite(w.R, { 'jobs/beta.md': fmtJob('beta', { ...line(w, 'beta'), state: 'MERGED' }) }, 'beta merged');
+  const rt = out(jobRetire(o({ module: 'alpha' })));
+  assert.deepEqual([rt.retired, rt.session, rt.measured], ['ALPHA #1', J1, false]);
+  assert.equal(line(w, 'alpha').state, 'ARCHIVED'); assert.match(line(w, 'alpha').retired, /session left idle/);
+  assert.match(readFileSync(join(w.bob.dir, 'build/metrics/T1.csv'), 'utf8'), new RegExp(`^${J1},job,ALPHA #1,alpha,`, 'm'));
   // a retired job's work is on the tranche: a module the plan orders after it may merge
-  assert.deepEqual(I.DONE, ['MERGED', 'RETIRED', 'ARCHIVED']);
-  const b2 = complete(w, 'beta', { name: 'BETA #1', session: J2, pr: 12, change: append('beta/src/index.mjs', '// R1 again\n'), after: ['alpha'] });
+  assert.deepEqual(I.DONE, ['MERGED', 'ARCHIVED']);
+  complete(w, 'beta', { name: 'BETA #1', session: J2, pr: 12, change: append('beta/src/index.mjs', '// R1 again\n'), after: ['alpha'] });
   out(I.reviewDecide(o({ module: 'beta', noReview: true, reason: 'a comment' })));
-  void b2;
   assert.equal(out(I.merge(o({ module: 'beta', head: ghUpdate(w, 'beta'), gate: 'success' }))).merge.pullNumber, 12);
   // a BOB's release: a record line in the plan; its session left idle
   const p = parsePlan(stateRead(w.R, 'plan.md'));
@@ -298,9 +296,9 @@ test('R5 retirement and a BOB\'s release are record lines; a defect is a metrics
   assert.throws(() => I.defect(o({ module: 'alpha' })), /--what/);
   assert.throws(() => I.defect(o({ module: 'nope', what: 'x' })), /no module nope/);
   const d1 = out(I.defect(o({ module: 'alpha', what: 'twice(NaN), wrong' })));
-  assert.deepEqual([d1.reviewed, d1.tranche, d1.round], ['yes', 'T1', 'R1']);
+  assert.deepEqual([d1.reviewed, d1.tranche, d1.round], ['1/1', 'T1', 'R1']);   // from alpha's row its retirement wrote: one merge, reviewed
   const csv = readFileSync(join(w.bob.dir, 'build/metrics/T1.csv'), 'utf8');
-  assert.match(csv, /^,defect,ALPHA #1,alpha,,,,,,,yes,T1 R1: twice\(NaN\)  wrong$/m);
+  assert.match(csv, /^,defect,ALPHA #1,alpha,,,,,,,1\/1,T1 R1: twice\(NaN\)  wrong$/m);
   // a job's earlier row carries its merge's review count, which the defect takes
   writeFileSync(join(w.bob.dir, 'build/metrics/T1.csv'), `${csv}${J2},job,BETA #1,beta,1,1,1,1,1,9,0/1,\n`);
   commitPush(w.R, TRANCHE, ['build/metrics/T1.csv'], 'beta row');

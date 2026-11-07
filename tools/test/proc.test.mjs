@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as N from '../proc.mjs';
+import * as J from '../jobs.mjs';
 import { versionCommand, processHead } from '../platform.mjs';
 import { MEASUREMENT_RULE, budgetOf } from '../requirements.mjs';
 import * as P from '../planning.mjs';
@@ -381,17 +382,17 @@ test('the job\'s life (JOB-LIFE): layer start, the job\'s turn, the gate with th
   const src = join(alpha.dir, 'alpha/src/index.mjs');
   writeFileSync(src, `${readFileSync(src, 'utf8')}\n// R6: add(a, a).\nexport function twice(a) {\n  return add(a, a);\n}\n`);
   writeFileSync(join(alpha.dir, 'alpha/test/twice.test.mjs'), "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { twice } from '../src/index.mjs';\n\ntest('R6 twice(a) is add(a, a)', () => { assert.equal(twice(2), 4); assert.throws(() => twice('1'), TypeError); });\n");
-  const report = f(w.base, 'report.md', '**Met** · R6\n**Evidence**\n- `node --test alpha/test/*.test.mjs` → tests 4, pass 4\n- alpha/src/index.mjs:22\n');
-  assert.throws(() => N.jobComplete(jo({ reportFile: report })), /commit your module/);
+  const report = f(w.base, 'report.md', '**Met** · R6\n**Elsewhere** · none\n**Evidence**\n- `node --test alpha/test/*.test.mjs` → tests 4, pass 4\n- alpha/src/index.mjs:22\n'), approve = (m) => f(w.base, `v-${m}.md`, `VERDICT · approve\nDONE review-${m} · approve\n`);
+  assert.throws(() => J.jobComplete(jo({ reportFile: report, reviewFile: approve('alpha') })), /commit your module/);
   g(alpha.root, 'add', '-A'); g(alpha.root, 'commit', '-q', '-m', 'alpha: twice');
-  assert.throws(() => N.jobComplete(jo({ reportFile: f(w.base, 'r-no.md', '**Met** · R9\n**Evidence**\n- x.mjs:1\n') })), /R9 is not in/);
-  assert.throws(() => N.jobComplete(jo({ reportFile: f(w.base, 'r-ev.md', '**Met** · none\nno evidence\n') })), /no `\*\*Evidence\*\*` section/);
+  assert.throws(() => J.jobComplete(jo({ reportFile: f(w.base, 'r-no.md', '**Met** · R9\n**Elsewhere** · none\n**Evidence**\n- x.mjs:1\n'), reviewFile: approve('alpha') })), /R9 is not in/);
+  assert.throws(() => J.jobComplete(jo({ reportFile: f(w.base, 'r-ev.md', '**Met** · none\nno evidence\n') })), /no `\*\*Evidence\*\*` section/);
   // complete: R6's mark struck in the job's own commit, the gate green, the branch pushed, the comment and ready owed
-  const jc = N.jobComplete(jo({ reportFile: report }));
+  const jc = J.jobComplete(jo({ reportFile: report, reviewFile: approve('alpha') }));
   assert.ok(jc.tests.pass >= 4 && jc.tests.pass === jc.tests.tests, JSON.stringify(jc.tests));
   assert.deepEqual(jc.acts.map((x) => x.tool), ['add_issue_comment', 'update_pull_request']);
   assert.deepEqual([jc.acts[0].issue_number, jc.acts[1].pullNumber, jc.acts[1].draft], [11, 11, false]);
-  assert.match(jc.acts[0].body, /^\*\*Met\*\* · R6[\s\S]*\nTests: \d+\/\d+\. Checks: format, architecture, coverage, fixtures, ownership: no new finding\.\nSize: test runs 1, module lines \d+\. Head [0-9a-f]{7}\.$/);
+  assert.ok(J.evidenceItems(jc.acts[0].body).length && /^\*\*Met\*\* · R6[\s\S]*\nTests: \d+\/\d+ \(the module's own suite, \d+ s\)\. Checks here: ownership, format: no new finding; the rest is the gate's\.\nSelf-review: approved \(v-alpha\.md\)\.\nSize: test runs 1, module lines \d+\. Head [0-9a-f]{7}\.$/.test(jc.acts[0].body), jc.acts[0].body);
   assert.equal(g(alpha.root, 'log', '-1', '--format=%s'), 'alpha T1: met R6');
   assert.equal(g(alpha.root, 'status', '--porcelain'), '');   // the bundles read alpha's source, were regenerated for the run, and are not the job's to commit
   assert.doesNotMatch(g(alpha.root, 'show', 'HEAD:toy/build/requirements/alpha.md'), /not yet met: T1/);
@@ -415,7 +416,7 @@ test('the job\'s life (JOB-LIFE): layer start, the job\'s turn, the gate with th
   const bsrc = join(beta.dir, 'beta/src/index.mjs');
   writeFileSync(bsrc, readFileSync(bsrc, 'utf8').replace('// beta: totals', '// beta (N2: built on alpha.sum): totals'));
   g(beta.root, 'add', '-A'); g(beta.root, 'commit', '-q', '-m', 'beta: N2');
-  const bc = N.jobComplete(bo({ reportFile: f(w.base, 'rb.md', '**Met** · none\n**Evidence**\n- beta/src/index.mjs:1\n') }));
+  const bc = J.jobComplete(bo({ reportFile: f(w.base, 'rb.md', '**Met** · none\n**Elsewhere** · none\n**Evidence**\n- beta/src/index.mjs:1\n'), reviewFile: approve('beta') }));
   assert.deepEqual(bc.acts.map((x) => x.tool), ['add_issue_comment']);
   assert.match(bc.then, /ready is owed after alpha/);
   const bp = N.jobPosted(bo({ comment: 778 }));
@@ -467,10 +468,10 @@ test('the job\'s life (JOB-LIFE): layer start, the job\'s turn, the gate with th
   N.jobState(bo({ set: 'WORKING' }));
   writeFileSync(bsrc, readFileSync(bsrc, 'utf8').replace('(N2: built on alpha.sum)', '(R1: built on alpha.sum)'));
   g(beta.root, 'add', '-A'); g(beta.root, 'commit', '-q', '-m', 'beta: the gap');
-  const rb2 = f(w.base, 'rb2.md', '**Met** · none\n**Evidence**\n- beta/src/index.mjs:1\n');
-  assert.throws(() => N.jobComplete(bo({ reportFile: rb2 })), /merge tranche into your branch first: BOB has changed alpha\/src\/index\.mjs \(a module's code or tests\)/);   // alpha's merge: held (issue 88)
+  const rb2 = f(w.base, 'rb2.md', '**Met** · none\n**Elsewhere** · none\n**Evidence**\n- beta/src/index.mjs:1\n');
+  assert.throws(() => J.jobComplete(bo({ reportFile: rb2, reviewFile: approve('beta') })), /merge tranche into your branch first: BOB has changed alpha\/src\/index\.mjs \(a module's code or tests\)/);   // alpha's merge: held (issue 88)
   g(beta.root, 'fetch', '-q', 'origin'); g(beta.root, 'merge', '-q', '--no-edit', 'origin/tranche');
-  const bc2 = N.jobComplete(bo({ reportFile: rb2 }));
+  const bc2 = J.jobComplete(bo({ reportFile: rb2, reviewFile: approve('beta') }));
   assert.deepEqual(bc2.acts.map((x) => x.tool), ['add_issue_comment', 'update_pull_request']);   // alpha is merged: ready at once
   N.jobPosted(bo({ comment: 779, ready: true }));
   assert.deepEqual([N.jobState(bo({})).runs, N.jobState(bo({})).review], [2, null]);
@@ -480,8 +481,8 @@ test('the job\'s life (JOB-LIFE): layer start, the job\'s turn, the gate with th
   N.merged(o({ module: 'beta', sha: g2('rev-parse', 'HEAD') }));
   // a job's session replaced (JOB-LIFE §9): routed to a fresh one, recorded under the next number
   assert.deepEqual(N.jobRoute(o({ module: 'beta' })), { action: 'message', session: J2 });
-  const jr = N.jobRoute(o({ module: 'beta', contextPct: 60 }));
-  assert.deepEqual([jr.action, jr.title, jr.archive, jr.model], ['create_session', 'BETA #2', J2, 'claude-opus-5-5']);
+  const jr = J.jobRoute(o({ module: 'beta', contextPct: 60 }));
+  assert.deepEqual([jr.action, jr.title, jr.predecessor, jr.model], ['create_session', 'BETA #2', J2, 'claude-opus-5-5']);
   N.jobStarted(o({ module: 'beta', name: 'BETA #2', session: J3 }));
   assert.deepEqual(N.status(o()).owed, []);
 
@@ -507,7 +508,7 @@ test('the job\'s life (JOB-LIFE): layer start, the job\'s turn, the gate with th
   // issue 88: BOB recorded a plan note meanwhile, a record the gate does not read for alpha: the job completes without merging it
   g2('fetch', '-q', 'origin'); g2('merge', '-q', '--ff-only', 'origin/tranche');
   writeFileSync(join(w.bob.dir, 'build/plan/notes-T2.md'), '# T2, prepared ahead (P18)\n'); N.commitPush(R, N.TRANCHE, ['build/plan/notes-T2.md'], 'prepared ahead (P18): a note');
-  const jc2 = N.jobComplete(jo({ reportFile: f(w.base, 'r2.md', '**Met** · none\n**Evidence**\n- alpha/test/twice.test.mjs:5\n') }));
+  const jc2 = J.jobComplete(jo({ reportFile: f(w.base, 'r2.md', '**Met** · none\n**Elsewhere** · none\n**Evidence**\n- alpha/test/twice.test.mjs:5\n'), reviewFile: approve('alpha') }));
   assert.throws(() => g(alpha.root, 'merge-base', '--is-ancestor', 'origin/tranche', 'HEAD'));   // completed behind the tranche, by the note only
   assert.equal(jc2.acts[0].issue_number, 13);
   N.jobPosted(jo({ comment: 780, ready: true }));
@@ -541,12 +542,11 @@ test('the job\'s life (JOB-LIFE): layer start, the job\'s turn, the gate with th
   g2('fetch', '-q', 'origin'); g2('merge', '-q', '--no-ff', '-m', 'alpha T1 (#13)', 'origin/job/alpha'); g2('push', '-q', 'origin', 'HEAD:tranche');
   N.merged(o({ module: 'alpha', sha: g2('rev-parse', 'HEAD') }));
 
-  // retirement: alpha early (beta, its user, is merged), a record line (INT-6: no session archived), then its usage row
-  const rt = N.jobRetire(o({ module: 'alpha' }));
-  assert.deepEqual(N.status(o()).owed, []);
+  // retirement: alpha early (beta, its user, is merged), with its usage row; the layer closes with beta's archive owed
+  const rt = J.jobRetire(o({ module: 'alpha', usage: JSON.stringify({ cache_read_tokens: 100, cache_write_tokens: 20, input_tokens: 3, output_tokens: 9 }) }));
+  assert.deepEqual([rt.retired, rt.session, rt.measured], ['ALPHA #1', J1, true]);
   assert.throws(() => N.epochClose(o()), /sessions still live/);
-  N.jobArchived(o({ module: 'alpha', session: J1, usage: JSON.stringify({ cache_read_tokens: 100, cache_write_tokens: 20, input_tokens: 3, output_tokens: 9 }) }));
-  assert.throws(() => N.jobArchived(o({ module: 'alpha', session: J1, usage: '{}' })), /already has its row/);
+  assert.throws(() => J.jobArchived(o({ module: 'alpha', session: J1, usage: '{}' })), /already has its row/);
   assert.equal(N.jobState(o({ module: 'alpha' })).state, 'ARCHIVED');
   assert.throws(() => N.jobRetire(o({ module: 'alpha' })), /reads ARCHIVED/);
   const lc = N.layerClose(o({ layer: 1 }));
@@ -568,17 +568,18 @@ test('the job\'s life (JOB-LIFE): layer start, the job\'s turn, the gate with th
   N.bobArchived(o({ name: 'BOB #0', session: B2, usage: JSON.stringify({ cache_read_tokens: 1, cache_write_tokens: 1, input_tokens: 1, output_tokens: 1 }) }));
   const csv = readFileSync(join(w.bob.dir, 'build/metrics/T1.csv'), 'utf8');
   assert.match(csv, /^session,role,name,module,cache-read,cache-write,input,output,test runs,module lines,reviewed,note\n/);
-  assert.match(csv, new RegExp(`^${J1},job,ALPHA #1,alpha,100,20,3,9,2,\\d+,0/2,$`, 'm'));   // two merges (one re-open), neither reviewed
-  assert.match(csv, new RegExp(`^${J3},job,BETA #2,beta,,,,,2,\\d+,1/1,unmeasured: archive_session refused  Interfere With Workloads$`, 'm'));
-  assert.match(csv, new RegExp(`^${J2},job,BETA #1,beta,40,4,1,1,2,\\d+,1/1,replaced$`, 'm'));
+  const read = (m, s) => J.attemptsOf(R, m).find((a) => a.session === s)?.reading ?? 'unrecorded';
+  assert.match(csv, new RegExp(`^${J1},job,ALPHA #1,alpha,100,20,3,9,2,\\d+,0/2,attempt ALPHA #1 · reading ${read('alpha', J1)}$`, 'm'));   // two merges (one re-open), neither reviewed
+  assert.match(csv, new RegExp(`^${J3},job,BETA #2,beta,,,,,2,\\d+,1/1,unmeasured: archive_session refused  Interfere With Workloads · attempt BETA #2 · reading ${read('beta', J3)}$`, 'm'));
+  assert.match(csv, new RegExp(`^${J2},job,BETA #1,beta,40,4,1,1,2,\\d+,1/1,attempt BETA #1 · reading ${read('beta', J2)} · replaced$`, 'm'));
   assert.match(csv, new RegExp(`^${B2},BOB-final,BOB #0,,1,1,1,1,,,,$`, 'm'));
   assert.throws(() => N.handoff(o()), /owed: open PR stats/);
   // issue 101: a job archived before its merge is started again on its branch; one the tranche holds is done
   assert.throws(() => N.jobRoute(o({ module: 'alpha' })), /alpha reads ARCHIVED and (tranche holds its branch|its branch job\/alpha is gone \(deleted once merged\)): it is done/);
   const S1 = 'session_01STATS1aaaaaaaaaaaaaaaaa'; N.jobStarted(o({ module: 'stats', name: 'STATS #1', session: S1 }));
   N.jobArchived(o({ module: 'stats', session: S1, unmeasured: 'retired on a stale process' }));
-  const reopened = N.jobRoute(o({ module: 'stats' }));
-  assert.deepEqual([reopened.action, reopened.title, reopened.archive], ['create_session', 'STATS #2', S1]);
+  const reopened = J.jobRoute(o({ module: 'stats' }));
+  assert.deepEqual([reopened.action, reopened.title, reopened.predecessor], ['create_session', 'STATS #2', S1]);
   assert.ok(reopened.prompt.includes(`Your first act, before anything else: run \`${versionCommand(processHead(N.PROCESS))}\`.`));
   assert.equal(N.jobState(o({ module: 'stats' })).state, 'REOPENED');
 });
