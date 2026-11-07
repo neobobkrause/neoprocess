@@ -106,6 +106,13 @@ proc-legacy (no job: retired by the jobs above)
 - N2-47 · REC-7's fixture (K3): N2-8's halted-build fixture rebuilt from a frozen copy of Civicsmith's real state branch and handoff of 30 Oct, once a session on this account can read that repository (the record job built it from the measured description, its report of 30 Oct).
 - N2-48 · REC-3, ARC-5 (architecture's report J2, K22): `status` lists the checks' findings from their one result file (`checks/result.json`, or the manifest row's path), read as JSON by record itself, since record is earlier than architecture and cannot import it.
 
+**requirements**
+- N2-50 · REQ-1, requirements R8 (architecture's report, K23): `parse` and `marks` count a bold `**R<n>**` wherever it stands on its line (an id after a service's signature, as products' files write it: BOB #38's ruling), so the parser accepts every requirements file on a product's tranche as it stands.
+
+**architecture**
+- N2-51 · architecture R8 and its Uses (K23): the coverage check counts ids through `requirements.parse` and `marks` once N2-50 has merged, its own `requirementIds` removed.
+- N2-52 · architecture R8, P7 (K23): an id counts as named by a test only where a test's title or code names it, never a comment; every module's tests are measured against the new rule in the same run, and any module it leaves short gets its entry here.
+
 ## Deferred, with the hard reason (PLN 2)
 - INT-5's stages proven live, and the certification mark: a real product's full tranche, deployment and walk (a measurement that cannot happen inside this tranche).
 - PLT-14's private-product route and SHM-2's other-owner workflow proven live: something outside the product that does not yet exist (no such product).
