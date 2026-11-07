@@ -1,3 +1,3 @@
 VERDICT · approve
-Reviewed by JOBS #1 against build/requirements/jobs.md R1-R10, the diff 7337ea351f55...HEAD read whole; two gaps found in the first pass (R3: no per-path sizes; R6: a routed successor's call not rebuildable from the record) fixed in f13441e and proven by tools/test/jobs.test.mjs (R3, R6).
+Reviewed by JOBS #1: the fix commit 8af5f9a read whole against R5, R6 and R7 of build/requirements/jobs.md and the three gaps of the review; each is closed and proven by tools/test/jobs.test.mjs (R5, R6, R7).
 DONE review-jobs · approve
