@@ -39,6 +39,18 @@ Each job's turns, time by kind of work, files read and how often, time per revie
 
 **Read across both jobs (BOB #2, for BOB #3 to carry to causes):** about half of each job's wall clock was waiting on the architecture session; the architecture session's own time went most to the message check before each message to Bob; inside the jobs, full test-suite runs, repeated after every change, dominate tool time; review rounds multiplied all of it.
 
-## 3. Causes, fixes, confirmation
+## 3. Causes, fixes, confirmation (BOB #3, 7 Nov 2026, from §1 and §2 only)
 
-Written once §2 is in, from the evidence of §1 and §2 only.
+Layer 1's two jobs ran about 90 minutes each (record 89m16s, platform 91m28s). Their time splits into four causes, largest first. Each fix names where it is placed; layer 2 is measured the same way (§2's method, by a helper per job) to confirm it.
+
+| # | cause | evidence | fix | placed |
+| --- | --- | --- | --- | --- |
+| C1 | **Review rounds.** Each round was a full cycle: review, CHANGE, rework, full checks, complete, wait. | platform 4 reviews (gaps 7, 3, 1, 4), record 2 (18, 5); 65 of layer 1's minutes were review rounds (K15); platform's rounds 1-4 hold 44m53s of job windows (study-platform §4b) | the job reviews its own whole change before each completion (K14); one independent review per job, its gaps fixed once and verified by the architecture session (K15) | K14, K15 now; N2-21, N2-27 in code |
+| C2 | **Jobs waited on the architecture session.** | waiting for its next message: platform 2593 s of 5488 (47 %), record 1793 s of 5356 (33 %); mean 5m12s from a COMPLETE to its next message (study-platform §4b); a CHANGE sent mid-turn waited 380 s (study-record §4) | the architecture session's turns shortened: C3 removed, and each COMPLETE answered before other work in the same wake | practice now; N2-36 in code |
+| C3 | **The model check of every message to Bob.** | 62 calls, 19.0 of the architecture session's 97 tool minutes, the largest kind (§1); REQUIREMENTS.md MSG-5 forbids a model judge | messages to Bob checked by the deterministic plain-words check only (`say --no-judge`), no model call | practice now (MSG-5); N2-36 in code |
+| C4 | **The whole suite after every change.** | record: 11 full-suite runs of 92-130 s plus 3 inside `job complete`, 78 % of its tool time; platform: tests 397 of 682 tool seconds and 7 full checks of 77-157 s in the background (study-platform §2c) | a job runs its own module's tests while it works; the whole suite and the checks run once, in CI, on its pull request (GAT-1, GAT-2, JOB-5) | in every START and CHANGE from layer 2 on; N2-21, N2-23 in code |
+| C5 | **The architecture session's context.** | 177 million cache-read tokens, 57 % of the layer's 311 million; 505,418 tokens of context at its handoff, past its 40 % line (§1); P13: cost is context times turns | refresh at 40 % read from the session's own record, not on Bob's word | practice now; N2-30 in code |
+
+Not causes, measured and left: worker restarts (four, about 3 s each, study-platform §5); file reads (2 % of record's tool time, 4 % of platform's). The model writing with no tool running (record 58 % of turn time, platform 27 % of wall) is the work itself.
+
+**Confirmation.** At layer 2's close: each job's wall clock, its share waiting on the architecture session, its full-suite runs in-session (expected 0), its review rounds (expected 1), and the architecture session's tool minutes by kind, set beside the figures above.
