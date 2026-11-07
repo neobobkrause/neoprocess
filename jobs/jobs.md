@@ -1,6 +1,6 @@
 # jobs (transient)
 
-**Status** · JOBS #1 · session_012hdw2SqkDQYiAtzn73PR34 · MERGED · PR #132
+**Status** · JOBS #1 · session_012hdw2SqkDQYiAtzn73PR34 · ARCHIVED · PR #132
 **Runs** · 3
 **Owed** · none
 **Model** · opus
@@ -8,3 +8,4 @@
 **Merge** · merged 2065a39 2026-11-07
 **Reviews** · 1
 **Merges** · 2065a39 2026-11-07 reviews:1
+**Retired** · 2026-11-07 · session left idle
