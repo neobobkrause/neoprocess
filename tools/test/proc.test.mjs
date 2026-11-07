@@ -10,6 +10,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as N from '../proc.mjs';
 import * as J from '../jobs.mjs';
+import { reviewDecide } from '../integration.mjs';
 import { versionCommand, processHead } from '../platform.mjs';
 import { MEASUREMENT_RULE, budgetOf } from '../requirements.mjs';
 import * as P from '../planning.mjs';
@@ -475,7 +476,7 @@ test('the job\'s life (JOB-LIFE): layer start, the job\'s turn, the gate with th
   assert.deepEqual(bc2.acts.map((x) => x.tool), ['add_issue_comment', 'update_pull_request']);   // alpha is merged: ready at once
   N.jobPosted(bo({ comment: 779, ready: true }));
   assert.deepEqual([N.jobState(bo({})).runs, N.jobState(bo({})).review], [2, null]);
-  N.reviewDecide(o({ module: 'beta', noReview: true, reason: 'the gap is closed; re-reviewed for it only' }));
+  reviewDecide(o({ module: 'beta', noReview: true, commits: g(beta.root, 'rev-parse', 'HEAD'), reason: 'the gap is closed; re-reviewed for it only' }));   // K15: the verified fix commit named
   N.merge(o({ module: 'beta', head: g(beta.root, 'rev-parse', 'HEAD'), gate: 'success' }));
   g2('fetch', '-q', 'origin'); g2('merge', '-q', '--no-ff', '-m', 'beta T1 (#12)', 'origin/job/beta'); g2('push', '-q', 'origin', 'HEAD:tranche');
   N.merged(o({ module: 'beta', sha: g2('rev-parse', 'HEAD') }));
