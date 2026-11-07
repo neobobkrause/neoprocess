@@ -1,6 +1,6 @@
 # platform (transient)
 
-**Status** · PLATFORM #1 · session_01RAN5enucmXTQSLEYL3QPrK · MERGED · PR #127
+**Status** · PLATFORM #1 · session_01RAN5enucmXTQSLEYL3QPrK · ARCHIVED · PR #127
 **Runs** · 6
 **Owed** · none
 **Model** · opus
