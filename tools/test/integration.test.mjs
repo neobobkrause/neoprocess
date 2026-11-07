@@ -11,6 +11,8 @@ import { fileURLToPath } from 'node:url';
 import * as I from '../integration.mjs';
 import { repo, epochOpen, stateWrite, stateRead, fmtPlan, parsePlan, commitPush, TRANCHE } from '../record.mjs';
 import { constraints } from '../platform.mjs';
+import { trancheClose, trancheMerged } from '../planning.mjs';
+import { regenerate } from '../gate.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url)), TOY = join(HERE, '..', '..', 'dryrun');
 const B1 = 'session_01BBBBBBBBBBBBBBBBBBBBBBBB', J1 = 'session_01AAAAAAAAAAAAAAAAAAAAAAAA', J2 = 'session_01AAAAAAAAAAAAAAAAAAAAAAA2';
@@ -216,6 +218,36 @@ test('R4 main moves only by the close pull request, at CLOSING: the merge call i
   assert.equal(mg.merge.pullNumber, 11);
   out(I.merged(o({ module: 'alpha', sha: ghMerge(w, 'alpha', 11) })));
   w.g2('fetch', '-q', 'origin'); assert.equal(w.g2('rev-parse', 'origin/main'), main0);
+  owedHistory(w);
+});
+
+test('R4 the close and merge commands as they stand: planning\'s tranche close sets CLOSING and prints the one close pull request; only then is its merge printed, expecting the tranche\'s tip; main moves by that merge alone, recorded by tranche merged', async () => {
+  const w = world(), o = w.o;
+  // the round closed: its plan archived (its entries' jobs all merged, so none left in it here), none running; nothing owed
+  w.g2('rm', '-q', 'toy/build/plan/current.md');
+  mkdirSync(join(w.bob.dir, 'build/plan/archive'), { recursive: true });
+  writeFileSync(join(w.bob.dir, 'build/plan/archive/T1-R1.md'), '# Plan: test T1\n\n**Status** · OPEN · round R1.\n\n## Layer 1\n');
+  w.g2('add', 'toy/build/plan/archive/T1-R1.md'); w.g2('commit', '-q', '-m', 'round R1 of T1 archived'); w.g2('push', '-q', 'origin', 'HEAD:tranche');
+  const main0 = w.g2('rev-parse', 'origin/main');
+  assert.throws(() => I.closeMerge(o({ pr: 40 })), /not CLOSING: main moves only by the close pull request/);
+  assert.throws(() => trancheMerged(o({ sha: main0 })), /not CLOSING/);
+  // the close (planning R2), with the later modules' parts its caller gives: no ask open, gate's regeneration
+  const tc = await trancheClose(o(), { asks: () => [], regenerate });
+  assert.equal(tc.tranche, 'T1'); assert.deepEqual([tc.pr.base, tc.pr.head], ['main', 'tranche']);
+  assert.equal(parsePlan(stateRead(w.R, 'plan.md')).state, 'CLOSING');
+  w.g2('fetch', '-q', 'origin'); assert.equal(w.g2('rev-parse', 'origin/main'), main0);   // the close itself never moves main
+  // the close pull request's merge, printed only now, expecting the tranche's tip
+  const cm = out(I.closeMerge(o({ pr: 41 })));
+  const tip = w.g2('rev-parse', 'origin/tranche');
+  assert.deepEqual([cm.merge.tool, cm.merge.pullNumber, cm.merge.expectedHeadSha], ['merge_pull_request', 41, tip]);
+  // GitHub's merge of the close pull request; recorded from main, never from a report
+  const m = w.clone('main', 'main');
+  g(m.root, 'merge', '-q', '--no-ff', '-m', 'Merge pull request #41 from o/tranche', 'origin/tranche'); g(m.root, 'push', '-q', 'origin', 'HEAD:main');
+  const sha = g(m.root, 'rev-parse', 'HEAD');
+  assert.throws(() => trancheMerged(o({ sha: tip.replace(/^./, (c) => (c === 'a' ? 'b' : 'a')) })), /not a commit|is not on main/);
+  const tm = trancheMerged(o({ sha }));
+  assert.equal(tm.merged, sha.slice(0, 7)); assert.equal(parsePlan(stateRead(w.R, 'plan.md')).state, 'CLOSED');
+  assert.throws(() => I.closeMerge(o({ pr: 41 })), /reads CLOSED, not CLOSING/);
   owedHistory(w);
 });
 

@@ -4,9 +4,9 @@
 // record lines and rows (R5). Nothing here archives, re-arms, deletes or interrupts a session, or prints one as owed
 // (R6); every act it prints is the architecture session's, never Bob's (R7).
 //
-// K24: integration imports planning, jobs and gate once each has merged, and merges after them (gate merged: imported).
-// Until planning and jobs merge, the few record-level helpers it needs from them sit in the block marked BORROWED below,
-// written to their requirements files; each is replaced by the provider's import as it merges, in this job.
+// K24: integration imports planning, jobs and gate once each has merged, and merges after them (gate and planning merged:
+// imported). Until jobs merges, the job-line helpers it needs sit in the block marked BORROWED below, written to jobs'
+// requirements file; they are replaced by jobs' import as it merges, in this job.
 import { spawnSync } from 'node:child_process';
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -16,6 +16,8 @@ import { constraints } from './platform.mjs';
 import { modules as moduleMap } from '../checks/architecture.mjs';
 import { artifactRows } from '../checks/lib.mjs';
 import { readResult } from '../checks/run.mjs';
+// planning (K24; merged at 021a6ff): the running plan, its tranche and round, its entries.
+import { PLAN, tranche, trancheId, entries, roundNumber } from './planning.mjs';
 // gate (K25): a green tip behind the tranche only by records the gate does not read for the module (gate R5).
 import { gateNeutral } from './gate.mjs';
 // requirements (K25): the rule every review brief carries (requirements R4; REQ-3).
@@ -33,7 +35,7 @@ export const STALE_DAYS = 7;                                 // a constraint row
 // R6: the acts the classifier decides case by case (platform R4); nothing here prints one.
 export const NEVER = ['archive_session', 'update_trigger', 'delete_trigger', 'interrupt_session'];
 
-// ---- BORROWED until planning, jobs and gate merge (K24) ----
+// ---- BORROWED until jobs merges (K24) ----
 // jobs: the job line on the state branch (jobs' "job lines"; JOB-LIFE §2).
 const JOB = /^\*\*Status\*\* · ([A-Z][A-Z0-9-]* #\d+) · (session_[0-9A-Za-z]+|-) · (.+?)(?: · PR #(\d+))?$/m;
 export function parseJob(text) {
@@ -69,19 +71,6 @@ function allChecks(R) {
   const res = readResult(R);
   if (!res) return { fails: new Set([`check: no result written (${`${r.stdout}${r.stderr}`.trim().split('\n').pop()})`]) };
   return { fails: new Set(res.findings.map((f) => `${f.check}: ${String(f.finding).replace(/:\d+(?::\d+)?\b/g, '').trim()}`)) };
-}
-// planning: the running plan and its tranche id (planning R1).
-const PLAN = 'build/plan/current.md';
-function tranche(R) {
-  const text = R.read(PLAN) ?? refuse(`${PLAN}: no running plan on this checkout`);
-  return { id: text.match(/^# Plan: .*?\b([A-Z]+\d+[a-z]?)\s*$/m)?.[1] ?? refuse(`${PLAN}: the title names no tranche id (\`# Plan: … T<n>\`)`), text };
-}
-const archivedTranche = (R) => R.g(['ls-files', '--', R.rel('build/plan/archive')]).split('\n').map((f) => f.match(/\/([A-Z]+)(\d+)([a-z]?)-R(\d+)\.md$/)).filter(Boolean).sort((a, b) => Number(a[2]) - Number(b[2]) || a[3].localeCompare(b[3]) || Number(a[4]) - Number(b[4])).pop()?.slice(1, 4).join('') ?? null;
-const trancheId = (R, given) => given || (R.read(PLAN) ? tranche(R).id : archivedTranche(R) ?? refuse(`${PLAN}: no running plan and no archived one: --tranche <T>`));
-function entriesOf(planText, layer, m) {
-  const sec = planText.split(/^## /m).find((s) => s.startsWith(`Layer ${layer}`)) || '';
-  const block = sec.split(/^\*\*/m).find((b) => b.startsWith(`${m}**`));
-  return block ? block.slice(m.length + 2).trim() : '';
 }
 // jobs: the report's evidence items (rulebook BLD 8).
 function evidenceItems(report) {
@@ -279,7 +268,8 @@ export function layerClose(o) {
   const plan = parsePlan(stateRead(R, 'plan.md') || '');
   if (plan.layers[L] !== 'STARTED') refuse(`layer ${L} is ${plan.layers[L] || 'not started'}`);
   const { text } = tranche(R);
-  const jobs = modules(R).filter((x) => x.layer === L && entriesOf(text, L, x.id)).map((x) => [x.id, jobOf(R, x.id)]);
+  const inLayer = new Set(entries(text).filter((e) => e.layer === L && e.module).map((e) => e.module));
+  const jobs = modules(R).filter((x) => x.layer === L && inLayer.has(x.id)).map((x) => [x.id, jobOf(R, x.id)]);
   const open = jobs.filter(([, j]) => !j || !DONE.includes(j.state));
   if (open.length) refuse(`layer ${L}: ${open.map(([x, j]) => `${x} ${j ? j.state : 'no job'}`).join('; ')}`);
   R.fetch(TRANCHE);
@@ -378,7 +368,7 @@ export function defect(o) {
   on(R, TRANCHE);
   mod(R, m);
   const T = trancheId(R, o.tranche), csv = metricsFile(T), cur = R.read(csv) ?? METRICS_HEAD;
-  const round = o.round || (R.read(PLAN) || '').match(/^\*\*Status\*\*.*?\bround (R\d+)\b/m)?.[1] || `R${R.g(['ls-files', '--', R.rel('build/plan/archive')]).split('\n').filter((f) => new RegExp(`/${T}-R\\d+\\.md$`).test(f)).length + 1}`;
+  const round = o.round || `R${roundNumber(R, T)}`;   // the running round, or after the last one the next (planning)
   const last = cur.split('\n').map((l) => l.split(',')).filter((c) => c[1] === 'job' && c[3] === m).pop();
   const j = jobOf(R, m);
   const rev = last?.[10] || (j ? (/^review · .* · approved/.test(j.review || '') || (j.merges || []).some((x) => !/reviews:0$/.test(x)) ? 'yes' : j.review ? 'no' : 'unknown') : 'unknown');
