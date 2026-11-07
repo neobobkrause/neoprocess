@@ -1,6 +1,6 @@
 # requirements (transient)
 
-**Status** · REQUIREMENTS #1 · session_012hdw2SRgbqwdDGPhXQvSLS · MERGED · PR #129
+**Status** · REQUIREMENTS #1 · session_012hdw2SRgbqwdDGPhXQvSLS · ARCHIVED · PR #129
 **Runs** · 2
 **Owed** · none
 **Model** · opus
