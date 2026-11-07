@@ -185,7 +185,12 @@
         "PROCESS-MECHANICS.md",
         "README.md",
         "REQUIREMENTS.md",
-        "lane-neoprocess/",
+        "lane-neoprocess/DRYRUN.md",
+        "lane-neoprocess/HANDOFF.md",
+        "lane-neoprocess/filed-reports.md",
+        "lane-neoprocess/metrics.csv",
+        "lane-neoprocess/products.json",
+        "lane-neoprocess/replies/",
         "rulebooks/"
       ],
       "tests": [],
@@ -259,6 +264,7 @@
     "dryrun/",
     "lane-process-redesign/",
     "build/",
-    ".claude/"
+    ".claude/",
+    "lane-neoprocess/"
   ]
 }
