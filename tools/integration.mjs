@@ -8,7 +8,7 @@
 // K24: integration imports planning, jobs and gate, each merged before it (planning 021a6ff, jobs 2065a39, gate 7337ea3).
 import { spawnSync } from 'node:child_process';
 import { readFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { TRANCHE, jobBranch, stateBranch, refuse, repo, ghRepo, readRole, unpushed, commitPush, pruneRef, needEpoch, stateRead, stateWrite, parsePlan, planEdit, jobFiles, METRICS_HEAD, metricsFile } from './record.mjs';
 import { constraints } from './platform.mjs';
 // architecture (K25): the module map, the manifest's artifact rows, and the checks' one machine-readable result.
@@ -39,9 +39,10 @@ export const NEVER = ['archive_session', 'update_trigger', 'delete_trigger', 'in
 const jobPath = (m) => `jobs/${m}.md`;
 const loadJob = (R, m) => jobOf(R, m) ?? refuse(`no job for ${m} on the state branch`);
 const saveJob = (R, m, j, msg) => stateWrite(R, { [jobPath(m)]: fmtJob(m, j) }, msg);
-// A job whose work is on the tranche: merged, or retired after its merge (jobs' retirement writes ARCHIVED, its R7).
-export const DONE = Object.freeze(['MERGED', 'ARCHIVED']);
-const done = (R, m) => DONE.includes(jobOf(R, m)?.state);
+// A job whose work is on the tranche: MERGED, or a merge on its Merges line (a job retired after its merge keeps it);
+// a line that reads ARCHIVED with no merge is no merge (a session archived before its job merged).
+export const hasMerged = (j) => !!j && (j.state === 'MERGED' || (j.merges || []).length > 0);
+const done = (R, m) => hasMerged(jobOf(R, m));
 const modules = (R) => moduleMap(R).modules;
 const mod = (R, m) => modules(R).find((x) => x.id === m) ?? refuse(`no module ${m} in build/modules.json`);
 const artifacts = (R) => artifactRows(R.read('build/manifest.md') || '').map((r) => ({ ...r, path: r.paths.join(', ') }));
@@ -82,15 +83,15 @@ export function reviewConcerns(R, m, j) {
   if (j.runs >= 3) out.push(`third completion (completion ${j.runs})`);
   return out;
 }
-const reviewed = (j) => /^review · .* · approved · /.test(j.review || '') || /^(no review|verified) · /.test(j.review || '');
+const reviewed = (j) => /^review · .* · approved · /.test(j.review || '') || /^no review · /.test(j.review || '');
 
-// One decision per completion, written on the job line with the concerns found: `--no-review --reason`, or `--review
-// --reason` (the fresh worker's brief printed), or, after the one independent review found gaps and the job fixed them,
-// `--verified --commits <sha,…> --reason` (K15): the architecture session has checked those commits against the named
-// gaps itself, and no second review round runs.
+// One decision per completion, written on the job line with the concerns found: `--review --reason` (the fresh worker's
+// brief printed, the head it reviews recorded), or `--no-review --reason`. After the one independent review found gaps
+// (K15) no second review runs: `--no-review` then names the fix commits the architecture session verified against the
+// named gaps (`--commits <sha,…>`), each on the job's branch after the reviewed head, and is refused without them.
 export function reviewDecide(o) {
-  const R = repo(o.product), m = o.module, kinds = [o.review, o.noReview, o.verified].filter(Boolean).length;
-  if (!m || !o.reason || kinds !== 1) refuse('--module <m> (--review | --no-review | --verified --commits <sha,…>) --reason "<…>"');
+  const R = repo(o.product), m = o.module;
+  if (!m || !o.reason || !o.review === !o.noReview) refuse('--module <m> (--review | --no-review [--commits <sha,…>]) --reason "<…>"');
   const j = loadJob(R, m);
   if (j.state !== 'COMPLETE') refuse(`${m} reads ${j.state}: a review is decided on COMPLETE`);
   if (owedByJob(j).length) refuse(`${m} still owes: ${owedByJob(j).join('; ')}`);
@@ -98,22 +99,24 @@ export function reviewDecide(o) {
   R.fetch(TRANCHE, jobBranch(m));
   const concerns = reviewConcerns(R, m, j), note = `concerns: ${concerns.join('; ') || 'none'}`;
   const last = stateRead(R, `jobs/${m}/review.md`) || '';
-  if (o.verified) {
-    const gaps = last.split('\n').filter((l) => /^- R\d+ · /.test(l));
-    if (!j.reviews || !/^VERDICT · gaps$/m.test(last) || !gaps.length) refuse(`${m} has no review with gaps to verify against: --verified follows the one independent review's gaps (K15)`);
+  const reviewedHead = last.match(/^\*\*Reviewed head\*\* · ([0-9a-f]{7,40})$/m)?.[1] ?? null;
+  const gaps = /^VERDICT · gaps$/m.test(last) ? last.split('\n').filter((l) => /^- R\d+ · /.test(l)) : [];
+  if (o.noReview && j.reviews && gaps.length) {
     const shas = String(o.commits || '').split(/[,\s]+/).filter(Boolean);
-    if (!shas.length || !shas.every((s) => SHA.test(s))) refuse('--commits <sha,…>: the commits that fix the named gaps');
+    if (!shas.length || !shas.every((x) => SHA.test(x))) refuse(`${m}'s one independent review found ${gaps.length} gap(s) (K15): --no-review names the fix commit(s) you verified against them, --commits <sha,…>`);
+    if (!reviewedHead) refuse(`jobs/${m}/review.md records no reviewed head: the fix commits cannot be placed after it`);
     const head = R.g(['rev-parse', `origin/${jobBranch(m)}`]);
-    const bad = shas.filter((s) => { try { const c = R.g(['rev-parse', '--verify', `${s}^{commit}`]); return !is(R, c, head) || is(R, c, `origin/${TRANCHE}`); } catch { return true; } });
-    if (bad.length) refuse(`not commits of ${jobBranch(m)} beyond ${TRANCHE}: ${bad.join(', ')}`);
-    return { commit: saveJob(R, m, { ...j, review: `verified · ${shas.map((s) => s.slice(0, 7)).join(',')} against ${gaps.length} gap(s) · ${o.reason} · ${note}` }, `${m}: gap fixes verified`), concerns, gaps: gaps.length };
+    const bad = shas.filter((x) => { try { const c = R.g(['rev-parse', '--verify', `${x}^{commit}`]); return !is(R, c, head) || is(R, c, reviewedHead) || is(R, c, `origin/${TRANCHE}`); } catch { return true; } });
+    if (bad.length) refuse(`not commits of ${jobBranch(m)} after the reviewed head ${reviewedHead.slice(0, 7)}: ${bad.join(', ')}`);
+    return { commit: saveJob(R, m, { ...j, review: `no review · fix ${shas.map((x) => x.slice(0, 7)).join(',')} verified against ${gaps.length} gap(s) · ${o.reason} · ${note}` }, `${m}: gap fixes verified, no second review`), concerns, gaps: gaps.length };
   }
   if (o.noReview) return { commit: saveJob(R, m, { ...j, review: `no review · ${o.reason} · ${note}` }, `${m}: no review`), concerns };
-  if (j.reviews >= 1) refuse(`${m} has had its one independent review (K15): verify the fix commits against its gaps (--verified --commits <sha,…>) or decide --no-review`);
+  if (j.reviews >= 1) refuse(`${m} has had its one independent review (K15): verify the fix commits against its gaps and decide --no-review --commits <sha,…>`);
+  const reviewing = R.g(['rev-parse', `origin/${jobBranch(m)}`]);
   const model = concerns.some((c) => /^new module|^provided service|^sensitive/.test(c)) ? 'opus' : 'sonnet';
   const result = join(R.root, '.git', `proc-review-${m}.md`), { id: T } = tranche(R);
   const brief = reviewBrief(R, m, { by: parsePlan(stateRead(R, 'plan.md') || '').bob?.name ?? 'BOB', pr: j.pr, T, why: `${o.reason}; ${note}`, diff: `git -C ${R.root} diff origin/${TRANCHE}...origin/${jobBranch(m)}`, report: `git -C ${R.root} show origin/${stateBranch(needEpoch(R))}:jobs/${m}/report.md`, result, model });
-  const commit = stateWrite(R, { [jobPath(m)]: fmtJob(m, { ...j, reviews: (j.reviews || 0) + 1, review: `review · ${o.reason} · ${note} · working since ${now()}` }), [`jobs/${m}/review-brief.md`]: brief }, `${m}: review dispatched`);
+  const commit = stateWrite(R, { [jobPath(m)]: fmtJob(m, { ...j, reviews: (j.reviews || 0) + 1, review: `review · ${o.reason} · ${note} · head ${reviewing.slice(0, 12)} · working since ${now()}` }), [`jobs/${m}/review-brief.md`]: brief }, `${m}: review dispatched`);
   return { commit, concerns, agent: { description: `review ${m}`, prompt: brief, run_in_background: true, model: MODEL[model], effort: 'high' }, then: `proc review result --module ${m} --result-file ${result}` };
 }
 // The worker's verdict recorded, the review posted on the pull request, and on gaps the CHANGE to the job.
@@ -128,8 +131,9 @@ export function reviewResult(o) {
   if (verdict === 'gaps' && !gaps.length) refuse('VERDICT · gaps with no `- R<id> · …` line');
   const loose = gaps.filter((l) => !/^- R\d+ · [^·]*\S:\d+\b/.test(l));
   if (loose.length) refuse(`a gap names its file and line (\`- R<id> · <file>:<line> · …\`): ${loose.join(' | ')}`);
+  const head = j.review.match(/ · head ([0-9a-f]{7,40}) · working since /)?.[1] ?? null;
   const review = j.review.replace(/ · working since .*$/, ` · ${verdict === 'approve' ? 'approved' : `gaps: ${gaps.length}`} · ${today()}`);
-  const commit = stateWrite(R, { [jobPath(m)]: fmtJob(m, { ...j, review }), [`jobs/${m}/review.md`]: text }, `${m}: review ${verdict}`);
+  const commit = stateWrite(R, { [jobPath(m)]: fmtJob(m, { ...j, review }), [`jobs/${m}/review.md`]: `${text}${head ? `\n**Reviewed head** · ${head}` : ''}\n` }, `${m}: review ${verdict}`);
   // A COMMENT review carrying the verdict: GitHub refuses REQUEST_CHANGES and APPROVE on one's own pull request (BOB #1's
   // R-BOB-1-3, 29 Oct); the approval the merge reads is the Review line.
   const out = { commit, verdict, post: { tool: 'pull_request_review_write', ...ghRepo(R), pullNumber: j.pr, method: 'create', event: 'COMMENT', body: `${verdict === 'approve' ? 'APPROVED by the review' : 'CHANGES REQUESTED by the review'} (${review.split(' · ')[1]})\n\n${text}` } };
@@ -179,6 +183,11 @@ export function merged(o) {
   if (!is(R, full, `origin/${TRANCHE}`)) refuse(`${sha} is not on ${TRANCHE}`);
   let head = null; try { head = R.g(['rev-parse', `origin/${jobBranch(m)}`]); } catch { /* already gone */ }
   if (head && !is(R, head, full)) refuse(`${jobBranch(m)}'s tip ${head.slice(0, 7)} is not in ${sha}: not this job's merge`);
+  // the tip the merge was printed for, on the `merging <sha>` line: held by the merge commit even once the branch is gone
+  const printed = j.merge.match(/^merging ([0-9a-f]{7,40})\b/)?.[1];
+  let tip = null; try { tip = printed && R.g(['rev-parse', '--verify', `${printed}^{commit}`]); } catch { /* unknown here */ }
+  if (!tip) refuse(`the tip ${printed ?? '(none)'} that ${m}'s merge was printed for is not a commit this clone sees: not provable as this job's merge`);
+  if (!is(R, tip, full)) refuse(`${sha} does not hold ${tip.slice(0, 7)}, the tip ${m}'s merge was printed for: not this job's merge`);
   const commit = saveJob(R, m, { ...j, state: 'MERGED', merge: `merged ${full.slice(0, 7)} ${today()}`, merges: [...(j.merges || []), `${full.slice(0, 7)} ${today()} reviews:${j.reviews || 0}`] }, `${m}: MERGED ${full.slice(0, 7)}`);
   planEdit(R, (p) => clear(p, `merge ${m}`), `${m} merged`);
   const prune = head ? pruneRef(R, jobBranch(m)) : null;
@@ -201,23 +210,27 @@ export function layerTests(R, L) {
   for (const line of (R.read('build/manifest.md') || '').split('\n')) for (const x of line.matchAll(/\blayer (\d+)(?:'s)? tests?\b[^`|]*?((?:`[^`]+`[,;\s]*(?:and\s+)?)+)/gi)) if (Number(x[1]) === L) out.push(...[...x[2].matchAll(/`([^`]+)`/g)].map((y) => y[1]));
   return [...new Set(out)];
 }
-// The module a failing layer test belongs to: the owner of the test's file by the module map, else the module whose id
-// the test's name carries, else none (the CHANGE then goes to the architecture session to place).
-function ownerOf(R, L, name, files) {
-  const mods = modules(R).filter((x) => x.layer === L);
-  const under = (f, p) => f === p || f.startsWith(p.endsWith('/') ? p : `${p}/`);
-  const file = files.find((f) => name.includes(f)) ?? files.find((f) => name.includes(f.split('/').pop()));
-  return (file && mods.find((x) => [...(x.paths || []), ...(x.tests || [])].some((p) => under(file, p)))?.id) || mods.find((x) => new RegExp(`\\b${x.id}\\b`).test(name))?.id || null;
+// The layer's test files: each manifest path, a glob included, as the files git tracks under it (product-relative).
+function layerFiles(R, L) {
+  const out = [];
+  for (const p of layerTests(R, L)) for (const f of R.g(['ls-files', '--', R.rel(p)]).split('\n').filter(Boolean)) out.push(relative(R.dir, join(R.root, f)));
+  return [...new Set(out)];
 }
+// Each layer test file run on its own, so a red is known by its file, and the file by its owner in the module map.
 function runLayerTests(R, L, files) {
-  if (!files.length) return { tests: 0, pass: 0, fail: 0, failed: [] };
+  const mods = modules(R), under = (f, p) => f === p || f.startsWith(p.endsWith('/') ? p : `${p}/`);
+  const owner = (f) => mods.find((x) => [...(x.paths || []), ...(x.tests || [])].some((p) => under(f, p)))?.id ?? 'unplaced';
   const env = { ...process.env }; delete env.NODE_TEST_CONTEXT;
-  const r = spawnSync('node', ['--test', '--test-reporter=tap', ...files], { cwd: R.dir, env, encoding: 'utf8', maxBuffer: 1 << 28 });
-  const n = (k) => Number((r.stdout.match(new RegExp(`^# ${k} (\\d+)$`, 'm')) || [])[1] ?? 0);
-  // a failing subtest and its file both read `not ok`; the innermost names are the tests, and a file whose process died names itself
-  const failed = [...new Set([...r.stdout.matchAll(/^(\s*)not ok \d+ - (.+?)(?: # .*)?$/gm)].map((x) => x[2].trim()))];
-  if (r.status && !failed.length) failed.push(`the layer's tests: ${`${r.stdout}${r.stderr}`.trim().split('\n').pop()}`);
-  return { tests: n('tests'), pass: n('pass'), fail: n('fail'), failed };
+  const res = { tests: 0, pass: 0, fail: 0, failed: [], by: {} };
+  for (const f of files) {
+    const r = spawnSync('node', ['--test', '--test-reporter=tap', f], { cwd: R.dir, env, encoding: 'utf8', maxBuffer: 1 << 28 });
+    const n = (k) => Number((r.stdout.match(new RegExp(`^# ${k} (\\d+)$`, 'm')) || [])[1] ?? 0);
+    res.tests += n('tests'); res.pass += n('pass'); res.fail += n('fail');
+    const failed = [...new Set([...r.stdout.matchAll(/^\s*not ok \d+ - (.+?)(?: # .*)?$/gm)].map((x) => x[1].trim()))].map((t) => `${f}: ${t}`);
+    if (r.status && !failed.length) failed.push(`${f}: ${`${r.stdout}${r.stderr}`.trim().split('\n').pop()}`);
+    if (failed.length) { res.failed.push(...failed); (res.by[owner(f)] ??= []).push(...failed); }
+  }
+  return res;
 }
 // Every pull request of the layer merged; the layer's tests once over the merged layer (a red goes back to its module's
 // job as a CHANGE, the jobs live until the close); the artifacts regenerated and committed once; the checks whole over the
@@ -232,15 +245,14 @@ export function layerClose(o) {
   const { text } = tranche(R);
   const inLayer = new Set(entries(text).filter((e) => e.layer === L && e.module).map((e) => e.module));
   const jobs = modules(R).filter((x) => x.layer === L && inLayer.has(x.id)).map((x) => [x.id, jobOf(R, x.id)]);
-  const open = jobs.filter(([, j]) => !j || !DONE.includes(j.state));
+  const open = jobs.filter(([, j]) => !hasMerged(j));
   if (open.length) refuse(`layer ${L}: ${open.map(([x, j]) => `${x} ${j ? j.state : 'no job'}`).join('; ')}`);
   R.fetch(TRANCHE);
   if (!is(R, `origin/${TRANCHE}`, 'HEAD')) refuse(`the checkout is behind origin/${TRANCHE}: pull first`);
   if (unpushed(R).length) refuse(`the tranche checkout is not pushed: ${unpushed(R).join('; ')}`);
-  const files = layerTests(R, L), tests = runLayerTests(R, L, files);
+  const files = layerFiles(R, L), tests = runLayerTests(R, L, files);
   if (tests.failed.length) {
-    const by = new Map();
-    for (const t of tests.failed) { const x = ownerOf(R, L, t, files) ?? 'unplaced'; (by.get(x) ?? by.set(x, []).get(x)).push(t); }
+    const by = new Map(Object.entries(tests.by));
     const changes = [...by].map(([x, ts]) => { const j = jobs.find(([y]) => y === x)?.[1]; return { module: x, session: j?.session ?? null, message: `CHANGE: layer ${L}'s tests fail at the close for ${x}; fix them, then complete again:\n${ts.map((t) => `- ${t}`).join('\n')}`, then: x === 'unplaced' ? 'name the module these tests prove, then send it the CHANGE' : j?.state === 'MERGED' ? `proc job reopen --module ${x} --change-file <this message>, then send it` : `${x}'s job is retired: start a new one on this CHANGE (proc layer start --layer ${L} --modules ${x})` }; });
     refuse(`layer ${L}'s tests: ${tests.failed.length} red over the merged layer (${[...by.keys()].join(', ')}); the layer stays open:\n${JSON.stringify(changes, null, 2)}`);
   }
@@ -261,6 +273,7 @@ export function layerClose(o) {
   const live = jobs.filter(([, j]) => j.state === 'MERGED');
   const nextL = Object.keys(plan.layers).map(Number).includes(L + 1) || new RegExp(`^## Layer ${L + 1}\\b`, 'm').test(text) ? L + 1 : null;
   const pc = planEdit(R, (p) => ({ ...p, layers: { ...p.layers, [L]: 'CLOSED' } }), `layer ${L} closes`);
+  delete tests.by;
   return { layer: L, commit: commit ?? pc, tests, stale: staleRows, retire: live.map(([x, j]) => ({ module: x, session: j.session, then: `proc job retire --module ${x} [--usage '<usage read by a route the platform allows>' | --unmeasured "<why none could be read>"]` })), next: nextL ? `proc layer start --layer ${nextL}` : `proc round open (the completion round), or proc round close when nothing remains` };
 }
 function at(R, ref, fn) { const back = R.branch(), head = R.g(['rev-parse', 'HEAD']); R.g(['checkout', '-q', '--detach', ref]); try { return fn(); } finally { R.g(['checkout', '-q', back === 'HEAD' ? head : back]); } }

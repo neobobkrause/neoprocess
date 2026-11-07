@@ -66,7 +66,7 @@ const ghMerge = (w, m, pr) => { w.g2('fetch', '-q', 'origin'); w.g2('merge', '-q
 test('R1 the review: decided by judgment from the listed reasons and written; a fresh worker reads only the requirements, the diff and the report; gaps with file and line, posted, and sent as a CHANGE; one independent review, then the fixes verified (K15)', () => {
   const w = world(), o = w.o;
   complete(w, 'alpha', { name: 'ALPHA #1', session: J1, pr: 11, change: append('alpha/src/index.mjs', '\nexport function twice(a) { return add(a, a); }\n'), report: '**Met** · R6\n**Evidence**\n', runs: 3 });
-  assert.throws(() => I.reviewDecide(o({ module: 'alpha', reason: 'x' })), /--review \| --no-review \| --verified/);
+  assert.throws(() => I.reviewDecide(o({ module: 'alpha', reason: 'x' })), /--review \| --no-review \[--commits/);
   assert.throws(() => I.reviewDecide(o({ module: 'alpha', review: true, noReview: true, reason: 'x' })), /--review \| --no-review/);
   // the reasons are found in the change and written with the decision
   const rv = out(I.reviewDecide(o({ module: 'alpha', review: true, reason: 'a provided service changed' })));
@@ -91,14 +91,17 @@ test('R1 the review: decided by judgment from the listed reasons and written; a 
   assert.throws(() => I.merge(o({ module: 'alpha', head: 'abcdef1', gate: 'success' })), /not approved/);
   // the job fixes the gap and completes again (jobs' completion clears the decision and keeps the count): no second review
   const c = complete(w, 'alpha', { name: 'ALPHA #1', session: J1, pr: 11, change: append('alpha/src/index.mjs', '\nexport function twice(a) { return Object.is(a, -0) ? -0 : add(a, a); }\n'), reviews: 1 });
-  const fix = g(c.root, 'rev-parse', 'HEAD');
+  const fix = g(c.root, 'rev-parse', 'HEAD'), reviewedHead = stateRead(w.R, 'jobs/alpha/review.md').match(/^\*\*Reviewed head\*\* · ([0-9a-f]+)$/m)[1];
+  assert.notEqual(fix.slice(0, 12), reviewedHead);
   assert.throws(() => I.reviewDecide(o({ module: 'alpha', review: true, reason: 'again' })), /has had its one independent review \(K15\)/);
-  assert.throws(() => I.reviewDecide(o({ module: 'alpha', verified: true, commits: w.g2('rev-parse', 'HEAD'), reason: 'x' })), /not commits of job\/alpha beyond tranche/);
-  const vd = out(I.reviewDecide(o({ module: 'alpha', verified: true, commits: fix.slice(0, 9), reason: 'the -0 case is fixed and tested' })));
-  assert.equal(vd.gaps, 1); assert.match(line(w, 'alpha').review, new RegExp(`^verified · ${fix.slice(0, 7)} against 1 gap\\(s\\) · the -0 case is fixed and tested · concerns: `));
+  // K15's route: --no-review, naming the fix commit verified against the gaps; refused without one, or with one not after the reviewed head
+  assert.throws(() => I.reviewDecide(o({ module: 'alpha', noReview: true, reason: 'fixed' })), /found 1 gap\(s\) \(K15\): --no-review names the fix commit/);
+  assert.throws(() => I.reviewDecide(o({ module: 'alpha', noReview: true, commits: w.g2('rev-parse', 'HEAD'), reason: 'x' })), /not commits of job\/alpha after the reviewed head/);
+  assert.throws(() => I.reviewDecide(o({ module: 'alpha', noReview: true, commits: reviewedHead, reason: 'x' })), /not commits of job\/alpha after the reviewed head/);
+  const vd = out(I.reviewDecide(o({ module: 'alpha', noReview: true, commits: fix.slice(0, 9), reason: 'the -0 case is fixed and tested' })));
+  assert.equal(vd.gaps, 1); assert.match(line(w, 'alpha').review, new RegExp(`^no review · fix ${fix.slice(0, 7)} verified against 1 gap\\(s\\) · the -0 case is fixed and tested · concerns: `));
   // a job with no review behind it has nothing to verify; an approved review is the other way to merge
   complete(w, 'beta', { name: 'BETA #1', session: J2, pr: 12, change: append('beta/src/index.mjs', '// R1\n') });
-  assert.throws(() => I.reviewDecide(o({ module: 'beta', verified: true, commits: 'abcdef1', reason: 'x' })), /no review with gaps to verify against/);
   out(I.reviewDecide(o({ module: 'beta', review: true, reason: 'first user of alpha' })));
   const ra = out(I.reviewResult(o({ module: 'beta', resultFile: f(w.base, 'r3.md', 'VERDICT · approve\nDONE review-beta · verdict\n') })));
   assert.equal(ra.send, undefined); assert.match(ra.post.body, /^APPROVED by the review/);
@@ -124,7 +127,12 @@ test('R2 the merge: only a green, current, COMPLETE, decided tip in the plan\'s 
   // beta: owes its ready (a draft until alpha merges), and merges after alpha
   stateWrite(w.R, { 'jobs/beta.md': fmtJob('beta', { ...line(w, 'beta'), owed: [], review: 'no review · x · concerns: none' }) }, 'beta ready');
   assert.throws(() => I.merge(o({ module: 'beta', head: g(b.root, 'rev-parse', 'HEAD'), gate: 'success' })), /merges after alpha \(the plan's order\)/);
-  stateWrite(w.R, { 'jobs/beta.md': fmtJob('beta', { ...line(w, 'beta'), owed: ['ready after alpha'] }) }, 'beta waits');
+  // a predecessor whose session was archived before its merge (ARCHIVED, no merge on its line) is no merge: beta still waits
+  const a0 = line(w, 'alpha');
+  stateWrite(w.R, { 'jobs/alpha.md': fmtJob('alpha', { ...a0, state: 'ARCHIVED' }) }, 'alpha archived before its merge');
+  assert.equal(I.hasMerged(line(w, 'alpha')), false);
+  assert.throws(() => I.merge(o({ module: 'beta', head: g(b.root, 'rev-parse', 'HEAD'), gate: 'success' })), /merges after alpha \(the plan's order\)/);
+  stateWrite(w.R, { 'jobs/alpha.md': fmtJob('alpha', a0), 'jobs/beta.md': fmtJob('beta', { ...line(w, 'beta'), owed: ['ready after alpha'] }) }, 'beta waits');
   // the tranche moved by a record the gate does not read for alpha: the green tip merges over it
   w.g2('pull', '-q', 'origin', 'tranche');
   writeFileSync(join(w.bob.dir, 'build/plan/notes-T2.md'), '# T2, prepared ahead\n'); commitPush(w.R, TRANCHE, ['build/plan/notes-T2.md'], 'prepared ahead (P18)');
@@ -136,10 +144,13 @@ test('R2 the merge: only a green, current, COMPLETE, decided tip in the plan\'s 
   assert.throws(() => I.merged(o({ module: 'alpha', sha: 'abc' })), /--sha <merge commit>/);
   assert.throws(() => I.merged(o({ module: 'alpha', sha: w.g2('rev-parse', 'HEAD') })), /tip [0-9a-f]{7} is not in/);
   assert.throws(() => I.merged(o({ module: 'alpha', sha: ha })), /is not on tranche/);
-  const sha = ghMerge(w, 'alpha', 11);
+  const before = w.g2('rev-parse', 'origin/tranche'), sha = ghMerge(w, 'alpha', 11);
+  // the branch gone before the record (pruned): the merge commit must hold the tip the merge was printed for
+  w.g2('push', '-q', 'origin', '--delete', 'job/alpha');
+  assert.throws(() => I.merged(o({ module: 'alpha', sha: before })), /does not hold [0-9a-f]{7}, the tip alpha's merge was printed for/);
   const md = out(I.merged(o({ module: 'alpha', sha })));
   assert.equal(line(w, 'alpha').state, 'MERGED'); assert.match(line(w, 'alpha').merges[0], /^[0-9a-f]{7} \d{4}-\d\d-\d\d reviews:0$/);
-  assert.deepEqual(md.prune, { ref: 'job/alpha', deleted: true });
+  assert.equal(md.prune, null);   // already gone: nothing to prune
   assert.equal(md.send.session_id, J1); assert.match(md.send.message, /^MERGED: alpha is on tranche at [0-9a-f]{7} \(PR #11\)/);
   assert.deepEqual(md.ready.map((r) => [r.module, r.mark.tool, r.mark.pullNumber, r.mark.draft]), [['beta', 'update_pull_request', 12, false]]);
   assert.deepEqual(parsePlan(stateRead(w.R, 'plan.md')).owed, []);
@@ -161,6 +172,11 @@ test('R3 the layer\'s close: every pull request merged, the layer\'s tests once 
   assert.throws(() => I.layerClose(o({})), /--layer <n>/);
   assert.throws(() => I.layerClose(o({ layer: 2 })), /layer 2 is not started/);
   assert.throws(() => I.layerClose(o({ layer: 1 })), /layer 1: alpha COMPLETE; beta COMPLETE/);
+  // a job line reading ARCHIVED with no merge (its session archived before its merge) holds the layer open
+  const a0 = line(w, 'alpha');
+  stateWrite(w.R, { 'jobs/alpha.md': fmtJob('alpha', { ...a0, state: 'ARCHIVED' }) }, 'alpha archived before its merge');
+  assert.throws(() => I.layerClose(o({ layer: 1 })), /layer 1: alpha ARCHIVED; beta COMPLETE/);
+  stateWrite(w.R, { 'jobs/alpha.md': fmtJob('alpha', a0) }, 'alpha back (the fixture)');
   for (const [m, pr] of [['alpha', 11], ['beta', 12]]) {
     out(I.reviewDecide(o({ module: m, noReview: true, reason: 'a comment' })));
     out(I.merge(o({ module: m, head: ghUpdate(w, m), gate: 'success' })));
@@ -169,7 +185,7 @@ test('R3 the layer\'s close: every pull request merged, the layer\'s tests once 
   void a;
   // the manifest names layer 1's tests; one fails for alpha over the merged layer: the layer stays open, the CHANGE named
   mkdirSync(join(w.bob.dir, 'alpha/test/layer'), { recursive: true });
-  writeFileSync(join(w.bob.dir, 'alpha/test/layer/l1.test.mjs'), "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { sum } from '../../src/index.mjs';\ntest('alpha and beta agree on a total', () => { assert.equal(sum([1, 2]), 4); });\n");
+  writeFileSync(join(w.bob.dir, 'alpha/test/layer/l1.test.mjs'), "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { sum } from '../../src/index.mjs';\ntest('beta: the totals agree', () => { assert.equal(sum([1, 2]), 4); });\n");
   writeFileSync(join(w.bob.dir, 'build/manifest.md'), `${readFileSync(join(w.bob.dir, 'build/manifest.md'), 'utf8')}\nLayer 1 tests: \`alpha/test/layer/*.test.mjs\`\n`);
   commitPush(w.R, TRANCHE, ['alpha/test/layer/l1.test.mjs', 'build/manifest.md'], 'layer 1 tests');
   assert.deepEqual(I.layerTests(w.R, 1), ['alpha/test/layer/*.test.mjs']); assert.deepEqual(I.layerTests(w.R, 2), []);
@@ -177,7 +193,8 @@ test('R3 the layer\'s close: every pull request merged, the layer\'s tests once 
   assert.match(refusal, /^layer 1's tests: 1 red over the merged layer \(alpha\); the layer stays open/);
   const changes = JSON.parse(refusal.slice(refusal.indexOf('\n') + 1));
   assert.deepEqual(changes.map((c) => [c.module, c.session]), [['alpha', J1]]);
-  assert.match(changes[0].message, /^CHANGE: layer 1's tests fail at the close for alpha; fix them, then complete again:\n- alpha and beta agree on a total$/);
+  // the red goes to the module owning its file (alpha's tests), never to the module its name mentions (beta)
+  assert.match(changes[0].message, /^CHANGE: layer 1's tests fail at the close for alpha; fix them, then complete again:\n- alpha\/test\/layer\/l1\.test\.mjs: beta: the totals agree$/);
   assert.match(changes[0].then, /^proc job reopen --module alpha --change-file/);
   assert.equal(line(w, 'alpha').state, 'MERGED');   // the jobs stay live until the close
   // a job retired before the close (jobs' early retirement) cannot be re-opened: its CHANGE starts a new job instead
@@ -187,7 +204,7 @@ test('R3 the layer\'s close: every pull request merged, the layer\'s tests once 
   assert.match(JSON.parse(r2.slice(r2.indexOf('\n') + 1))[0].then, /^alpha's job is retired: start a new one on this CHANGE \(proc layer start --layer 1 --modules alpha\)$/);
   stateWrite(w.R, { 'jobs/alpha.md': fmtJob('alpha', merged) }, 'alpha merged again (the fixture)');
   // the fix is merged: the layer closes; the stale rows of platform's table listed; each job retired on the record
-  writeFileSync(join(w.bob.dir, 'alpha/test/layer/l1.test.mjs'), "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { sum } from '../../src/index.mjs';\ntest('alpha and beta agree on a total', () => { assert.equal(sum([1, 2]), 3); });\n");
+  writeFileSync(join(w.bob.dir, 'alpha/test/layer/l1.test.mjs'), "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { sum } from '../../src/index.mjs';\ntest('beta: the totals agree', () => { assert.equal(sum([1, 2]), 3); });\n");
   commitPush(w.R, TRANCHE, ['alpha/test/layer/l1.test.mjs'], 'layer 1 tests fixed');
   // a check finding the tranche did not have when it opened (a file no module owns) refuses the close; removed, it closes
   writeFileSync(join(w.bob.dir, 'stray.mjs'), 'export const x = 1;\n'); commitPush(w.R, TRANCHE, ['stray.mjs'], 'a stray file');
@@ -276,7 +293,7 @@ test('R5 retirement and a BOB\'s release are record lines; a defect is a metrics
   assert.equal(line(w, 'alpha').state, 'ARCHIVED'); assert.match(line(w, 'alpha').retired, /session left idle/);
   assert.match(readFileSync(join(w.bob.dir, 'build/metrics/T1.csv'), 'utf8'), new RegExp(`^${J1},job,ALPHA #1,alpha,`, 'm'));
   // a retired job's work is on the tranche: a module the plan orders after it may merge
-  assert.deepEqual(I.DONE, ['MERGED', 'ARCHIVED']);
+  assert.equal(I.hasMerged(line(w, 'alpha')), true);   // ARCHIVED with its merge on the Merges line
   complete(w, 'beta', { name: 'BETA #1', session: J2, pr: 12, change: append('beta/src/index.mjs', '// R1 again\n'), after: ['alpha'] });
   out(I.reviewDecide(o({ module: 'beta', noReview: true, reason: 'a comment' })));
   assert.equal(out(I.merge(o({ module: 'beta', head: ghUpdate(w, 'beta'), gate: 'success' }))).merge.pullNumber, 12);
