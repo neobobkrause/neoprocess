@@ -87,16 +87,29 @@ test('R2: every artifact regenerated; only those the regeneration changed agains
   assert.deepEqual(a.changed.filter((p) => p.startsWith('gen/')).sort(), ['gen/new.txt', 'gen/ok.txt']);
   assert.ok(!a.verified.includes('gen/same.txt'));   // unchanged: its failing verify is never run
   assert.deepEqual(a.stale, ['gen/new.txt']);
+  assert.deepEqual(a.failed, []);
   G.restore(w.R);
   assert.equal(g(w.root, 'status', '--porcelain'), '');
   w.job('alpha');
   w.put({ 'alpha/src/note.mjs': 'export const note = 1;\n' }, 'alpha: a file');
   assert.deepEqual(G.runGate(w.R, 'alpha', base).fails, ['artifacts: regenerated but not verified: gen/new.txt']);
+  // a regeneration that exits non-zero is a finding naming its artifact
+  g(w.root, 'checkout', '-q', TRANCHE);
+  const base2 = w.put({ 'build/manifest.md': mf.replace('| `gen/new.txt` | alpha | `mkdir -p gen && echo new > gen/new.txt` | `false` |\n', '| `gen/broken.txt` | alpha | `exit 1` | `true` |\n') }, 'tranche: a broken regeneration');
+  assert.deepEqual(G.regenerate(w.R).failed, ['gen/broken.txt']); G.restore(w.R);
+  g(w.root, 'checkout', '-q', '-b', 'job/alpha2', base2);
+  w.put({ 'alpha/src/note.mjs': 'export const note = 1;\n' }, 'alpha: a file');
+  assert.deepEqual(G.runGate(w.R, 'alpha', base2).fails, ['artifacts: regeneration failed: gen/broken.txt']);
 });
 
 test('R3: every lock file installed where it sits; the product\'s Node version from its version file', () => {
   const w = world();
   assert.deepEqual(G.installs(w.R), { locks: [], node: null });
+  w.put({ '.tool-versions': 'python 3.12\n' }, 'a .tool-versions with no nodejs line');
+  assert.equal(G.installs(w.R).node, null);
+  w.put({ '.tool-versions': 'python 3.12\nnodejs 20.11.0\n' }, 'a .tool-versions with nodejs');
+  assert.equal(G.installs(w.R).node, '.tool-versions');
+  g(w.root, 'rm', '-q', 'toy/.tool-versions'); g(w.root, 'commit', '-q', '-m', 'no .tool-versions');
   assert.match(G.workflow(w.R), new RegExp(`node-version: ${G.NODE_DEFAULT}\\n`));
   w.put({ '.nvmrc': '20\n', 'web/package-lock.json': '{}\n', 'yarn.lock': '\n' }, 'locks');
   const i = G.installs(w.R);
@@ -120,15 +133,21 @@ test('R4: the module read from the diff; a touched module named in another\'s `f
   assert.throws(() => step({ 'alpha/src/k2.mjs': 'y', 'legacy/k2.mjs': 'z' }), /several modules: alpha, legacy/);
 });
 
-test('R5: the gate workflow from the template, triggered by the module paths, tests and generated artifacts, never by a record path, once per tip', () => {
+test('R5: the gate workflow from the template, triggered by the module paths, tests, generated artifacts and the files the checks read, never by another record path, once per tip', () => {
   const w = world(), text = G.workflow(w.R);
   assert.match(text, /^name: gate\n/);
   assert.match(text, new RegExp(`branches: \\[${TRANCHE}\\]\\n +types: \\[opened, synchronize, reopened\\]\\n`));   // a new tip only
   const listed = [...text.matchAll(/^ {6}- '([^']+)'$/gm)].map((x) => x[1]), on = listed.filter((p) => !p.startsWith('!')), off = listed.filter((p) => p.startsWith('!')).map((p) => p.slice(1));
   for (const p of ['toy/alpha/src/**', 'toy/alpha/test/**', 'toy/beta/scripts/**', 'toy/legacy/**', 'toy/beta/dist/bundle.txt']) assert.ok(on.includes(p), p);
   for (const p of recordPaths().durable) assert.ok(off.includes(`toy/${p}${p.endsWith('/') ? '**' : ''}`), p);
-  assert.ok(on.every((p) => !p.startsWith('toy/build/')));
-  assert.ok(listed.indexOf(off.length ? `!${off[0]}` : '') > listed.indexOf(on[on.length - 1]));   // the exclusions come last, so they win
+  assert.ok(!off.includes('toy/build/**'));   // only record.paths()' records are excluded
+  // GitHub's filter takes a file's last matching pattern: the files the checks read come after the exclusions, so they trigger
+  const lastOff = listed.lastIndexOf(`!${off[off.length - 1]}`);
+  for (const p of ['toy/build/requirements/alpha.md', 'toy/build/requirements/stats.md', 'toy/build/modules.json', 'toy/build/layers.md', 'toy/build/manifest.md']) assert.ok(listed.indexOf(p) > lastOff, p);
+  const lastMatch = (f) => { let hit = null; for (const p of listed) { const neg = p.startsWith('!'), q = neg ? p.slice(1) : p; if (q === f || (q.endsWith('**') && f.startsWith(q.slice(0, -2)))) hit = !neg; } return hit; };
+  assert.equal(lastMatch('toy/build/requirements/alpha.md'), true);
+  assert.equal(lastMatch('toy/build/plan/current.md'), false);   // a record the checks do not read
+  assert.equal(lastMatch('toy/alpha/src/index.mjs'), true);
   assert.match(text, /run: node \.neoprocess\/tools\/gate\.mjs gate --product "toy" --base HEAD\^1\n/);
   assert.doesNotMatch(text, /\{\{\w+\}\}/);
   // a green tip whose base differs from the tranche only by record paths merges as it stands; any other file holds it
@@ -176,10 +195,26 @@ test('R9: the hand form in a session is a check of what CI will do, never a merg
   const s = G.gateCheck({ product: w.dir });
   assert.deepEqual([s.ok, s.module, s.evidence], [true, 'alpha', false]);
   assert.match(s.note, /never a merge's evidence/);
+  assert.equal(existsSync(join(w.dir, resultPath(w.R))), false);   // a session's run leaves no result file
   process.env.GITHUB_ACTIONS = 'true';
   try {
     const c = G.gateCheck({ product: w.dir, base: TRANCHE });
     assert.deepEqual([c.ok, c.evidence, c.note], [true, true, undefined]);
   } finally { delete process.env.GITHUB_ACTIONS; }
   assert.throws(() => G.gateCheck({ product: w.dir, base: 'nope' }), /not a commit/);
+});
+
+test('R6: a CI run keeps the checks\' result file for the merge and `status` to read; it is the findings the gate reported', () => {
+  const w = world(); w.job('alpha');
+  w.put({ 'beta/src/index.mjs': `${readFileSync(join(w.dir, 'beta/src/index.mjs'), 'utf8')}// not alpha's\n` }, 'alpha: touches beta');
+  process.env.GITHUB_ACTIONS = 'true';
+  let c;
+  try { c = G.gateCheck({ product: w.dir, base: TRANCHE, module: 'alpha' }); } finally { delete process.env.GITHUB_ACTIONS; }
+  const file = join(w.dir, resultPath(w.R));
+  assert.ok(existsSync(file));
+  const kept = JSON.parse(readFileSync(file, 'utf8'));
+  assert.equal(kept.commit, g(w.root, 'rev-parse', 'HEAD'));   // HEAD's result, not the base's
+  assert.equal(kept.module, 'alpha');
+  assert.deepEqual(kept.findings, c.findings);
+  assert.ok(c.findings.some((f) => f.check === 'ownership' && f.file === 'beta/src/index.mjs'));
 });

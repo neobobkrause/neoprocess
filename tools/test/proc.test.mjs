@@ -651,7 +651,6 @@ test('the one skill\'s reading, the shims written and checked for drift, the gat
   writeFileSync(src, `${readFileSync(src, 'utf8')}// a line\n`);
   g(w.bob.root, 'add', '-A'); g(w.bob.root, 'commit', '-q', '-m', 'alpha: a line');
   const g1 = N.gateCmd({ product: w.bob.dir, process: '/p/neoProcess', repo: 'o/neoProcess', ref: 'lane', base });
-  assert.equal(g(w.bob.root, 'status', '--porcelain'), '');   // the bundles (which read alpha's source) were regenerated for the run and put back
   assert.deepEqual([g1.ok, g1.module, g1.fails, g1.checks], [true, 'alpha', [], ['format', 'architecture', 'coverage', 'fixtures']]);
   assert.ok(g1.tests.pass > 0 && g1.tests.pass === g1.tests.tests);
   writeFileSync(join(w.bob.dir, 'beta/src/index.mjs'), `${readFileSync(join(w.bob.dir, 'beta/src/index.mjs'), 'utf8')}// not alpha's\n`);

@@ -50,11 +50,12 @@ export function artifacts(R, ref = 'HEAD') {
 }
 const sh = (R, c) => spawnSync('sh', ['-c', c], { cwd: R.dir, encoding: 'utf8' });
 const moved = (R, ps) => (ps.length ? R.raw(['status', '--porcelain', '--untracked-files=all', '--', ...ps.map(R.rel)]).split('\n').filter(Boolean).map((l) => l.slice(3)) : []);
-// Regenerates every artifact the manifest lists, then verifies only those the regeneration changed against HEAD:
-// { changed: [path], verified: [path], stale: [path] }. The working tree keeps the regenerated files; `restore` puts them back.
+// Regenerates every artifact the manifest lists, then verifies only those the regeneration changed against HEAD; a
+// regeneration that exits non-zero is named by its artifact (`failed`).
+// { changed: [path], verified: [path], stale: [path], failed: [path] }. The working tree keeps the regenerated files; `restore` puts them back.
 export function regenerate(R) {
-  const rows = artifacts(R);
-  for (const a of rows) sh(R, a.regen);
+  const rows = artifacts(R), failed = [];
+  for (const a of rows) if (sh(R, a.regen).status !== 0) failed.push(...a.paths);
   const changed = [], verified = [], stale = [];
   for (const a of rows) {
     const c = a.paths.filter((p) => moved(R, [p]).length);
@@ -62,7 +63,7 @@ export function regenerate(R) {
     changed.push(...c); verified.push(...a.paths);
     if (sh(R, a.verify).status !== 0) stale.push(...a.paths);
   }
-  return { changed, verified, stale };
+  return { changed, verified, stale, failed };
 }
 // Every artifact path put back as HEAD has it (a file HEAD lacks is removed).
 export function restore(R) {
@@ -147,6 +148,7 @@ export function runGate(R, m, base, { keep = false } = {}) {
     art = regenerate(R);
     tests = suite(R, testFiles(R, m));
   } finally { restore(R); }
+  if (art.failed.length) fails.push(`artifacts: regeneration failed: ${art.failed.join(', ')}`);
   if (art.stale.length) fails.push(`artifacts: regenerated but not verified: ${art.stale.join(', ')}`);
   const ck = checks(R, m, base, 'HEAD', { keep });
   const red = reds(tests);
@@ -181,7 +183,8 @@ export function moduleOfDiff(R, base) {
 // ---- the hand form (R9) ----
 
 // The gate on this checkout against the base, the module read from the diff when none is named. In a session it is a
-// check of what CI will do, never a merge's evidence: `evidence` is true only in CI.
+// check of what CI will do, never a merge's evidence: `evidence` is true only in CI. In CI the checks' result file is kept
+// for the merge and `status` to read (`keep`, by default there and nowhere else).
 export function gateCheck(o) {
   const R = repo(o.product);
   let base;
@@ -192,7 +195,7 @@ export function gateCheck(o) {
   }
   const m = o.module || moduleOfDiff(R, base), evidence = inCI();
   if (!m) return { ok: true, module: null, base: base.slice(0, 7), fails: [], note: 'nothing changed since the base: the job\'s opening commit', tests: { pass: 0, tests: 0 }, checks: [], findings: [], inherited: { tests: [], findings: [] }, evidence };
-  const r = runGate(R, m, base, { keep: !!o.keep });
+  const r = runGate(R, m, base, { keep: o.keep ?? inCI() });
   return { ok: !r.fails.length, module: m, base: base.slice(0, 7), fails: r.fails, tests: { pass: r.tests.pass, tests: r.tests.tests }, checks: r.checks, findings: r.findings, inherited: r.inherited, evidence, ...(evidence ? {} : { note: 'a check of what CI will do, never a merge\'s evidence (GAT-1)' }) };
 }
 
@@ -218,17 +221,21 @@ export function gateNeutral(R, m, head) {
 export function installs(R) {
   const S = snapshot(R);
   const locks = S.files.filter((f) => f.split('/').pop() in LOCKS && !f.split('/').includes('node_modules')).map((f) => ({ file: f, dir: dirname(f), run: LOCKS[f.split('/').pop()] }));
-  const node = NODE_FILES.find((f) => S.has(f) && (f !== 'package.json' || !!JSON.parse(S.read(f) || '{}').engines?.node)) ?? null;
+  const names = { 'package.json': (t) => !!JSON.parse(t || '{}').engines?.node, '.tool-versions': (t) => /^nodejs\s+\S/m.test(t || '') };
+  const node = NODE_FILES.find((f) => S.has(f) && (!names[f] || names[f](S.read(f)))) ?? null;
   return { locks, node };
 }
-// The paths that trigger the gate (R5): every module's paths and tests, the files the checks read that are no record
-// paths, and the generated artifacts; then every record path excluded (`record.paths()` and the build state), last, so a
-// record write never triggers it. Product-relative, as GitHub's filter patterns from the repository's root.
+// The paths that trigger the gate (R5): every module's paths and tests and the generated artifacts; then every record
+// path of `record.paths()` excluded; then, last, the files the checks read for a module (the tables GATE_READS names and
+// each module's requirements file), even where they sit among the records. GitHub's filter takes the last pattern a file
+// matches, so a record write triggers the gate only where the checks read it. Product-relative, as patterns from the
+// repository's root.
 export function triggers(R) {
   const S = snapshot(R), at = (p) => (S.prefix === '.' ? p : `${S.prefix}/${p}`), glob = (p) => (p.endsWith('/') ? `${at(p)}**` : at(p));
-  const on = [...mods(R).flatMap((y) => [...(y.paths || []), ...(y.tests || [])]), ...GATE_READS.filter((f) => !isRecordPath(f)), ...artifacts(R).flatMap((a) => a.paths)].filter((p) => !isRecordPath(p));
-  const off = ['build/', ...recordPaths().durable];
-  return { paths: [...new Set(on.map(glob))], ignored: [...new Set(off.map(glob))] };
+  const all = mods(R);
+  const on = [...all.flatMap((y) => [...(y.paths || []), ...(y.tests || [])]), ...artifacts(R).flatMap((a) => a.paths)];
+  const read = [...GATE_READS, ...all.map((y) => `build/requirements/${y.id}.md`)];
+  return { paths: [...new Set(on.map(glob))], ignored: [...new Set(recordPaths().durable.map(glob))], read: [...new Set(read.map(glob))] };
 }
 const template = () => readFileSync(TEMPLATE, 'utf8').split(/^# ==== regression ====\n/m);
 const fill = (text, vals) => text.replace(/\{\{(\w+)\}\}/g, (_, k) => (k in vals ? vals[k] : refuse(`the gate template names {{${k}}}, which has no value`)));
@@ -249,7 +256,7 @@ function common(R, o = {}) {
 // The product's gate workflow, rendered from tools/gate.yml.tmpl (R5, R3).
 export function workflow(R, o = {}) {
   const t = triggers(R), list = (xs) => xs.map((p) => `      - '${p}'`).join('\n');
-  return fill(template()[0], { ...common(R, o), PATHS: list([...t.paths, ...t.ignored.map((p) => `!${p}`)]) });
+  return fill(template()[0], { ...common(R, o), PATHS: list([...t.paths, ...t.ignored.map((p) => `!${p}`), ...t.read]) });
 }
 // The full regression's workflow, its own time budget, run on the runner only (R7).
 export function regressionWorkflow(R, o = {}) {
