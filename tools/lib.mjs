@@ -200,20 +200,8 @@ export function allChecks(R) {
 // first item after a `·` or `:`) runs to the next line that starts `**` or `#`; each line is an item (a bullet or number
 // marker is dropped). An item counts when it is a command run with its result (a `command` followed by text), a file:line,
 // or a test run with its totals (`3/3`, `pass 3`, `3 pass`, `tests 3`). Returns the items, or null with no section.
-export const EVIDENCE_FORMS = 'a command run with its result line (`cmd` → result), a file:line (src/x.mjs:12), or a test run with its totals (tests 3, pass 3)';
-export const EVIDENCE_ITEM = [/`[^`\n]+`.*\S{3,}/, /[\w./-]+\.\w+:\d+/, /\b\d+\s*\/\s*\d+\b|\bpass(?:ed)?\s*:?\s*\d+|\b\d+\s+pass|\btests?\s*:?\s*\d+/i];
-export function evidenceItems(report) {
-  const lines = String(report || '').split('\n'), i = lines.findIndex((l) => /^\*\*Evidence\*\*/.test(l));
-  if (i < 0) return null;
-  const items = [], first = lines[i].replace(/^\*\*Evidence\*\*\s*[·:]?\s*/, '').trim();
-  if (first) items.push(first);
-  for (const l of lines.slice(i + 1)) {
-    if (/^(\*\*|#)/.test(l)) break;
-    const t = l.replace(/^\s*(?:[-*]|\d+[.)])\s+/, '').trim();
-    if (t) items.push(t);
-  }
-  return items;
-}
+// The report's evidence forms are the jobs module's (tools/jobs.mjs, R5), read here by the legacy callers.
+export { EVIDENCE_FORMS, EVIDENCE_ITEM, evidenceItems } from './jobs.mjs';
 
 // ---- steps for Bob (P20) ----
 
