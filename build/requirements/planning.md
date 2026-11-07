@@ -36,6 +36,8 @@ Tranches, rounds and layers as the only structure a build has; entries placed at
 
 ### Uses
 
+- `platform`: `grantsHeld` (tranche open's grant check).
+- `architecture`: the words check and `run` (the whole-product checks at tranche open and close).
 - `record`: `stateRead`, `stateWrite`, `planEdit`, `commitPush`, `stop`, `resume`, `metricsRow`, `status`.
 - `requirements`: `parse` (a plan entry's requirement ids checked against the module's file).
 
