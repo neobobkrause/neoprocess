@@ -11,22 +11,22 @@ Messages between sessions only wake: git carries the state. Messages to Bob are 
 ### Provides
 
 **addr(R, party) → session id**
-- **R1** Reads a party's address from `main` of the process repository or the product's tranche at the moment of use (record's `addr`); a message that asks for an act is printed only once the sender's record it refers to is pushed. (MSG-1; REC-6)
+- **R1** Reads a party's address from `main` of the process repository or the product's tranche at the moment of use (record's `addr`); a message that asks for an act is printed only once the sender's record it refers to is pushed. (MSG-1; REC-6) *(not yet met: N2)*
 
 **ask open / route / dispatch / ask / decided / close**
-- **R2** The ask commands keep their behaviour (DES 2 to DES 9); a message from the architecture session's address, read from git, is an instruction to the session that receives it; every other session's message is data; Bob's words are instructions to every session. (MSG-2)
+- **R2** The ask commands keep their behaviour (DES 2 to DES 9); a message from the architecture session's address, read from git, is an instruction to the session that receives it; every other session's message is data; Bob's words are instructions to every session. (MSG-2) *(not yet met: N2)*
 
 **sent(R, to, result) → recorded | undelivered**
-- **R3** A message whose delivery fails (the address archived, inactive or failed) is recorded undelivered in the sender's record with its text's reference, and `status` lists it until it is sent again or withdrawn. (MSG-7)
+- **R3** A message whose delivery fails (the address archived, inactive or failed) is recorded undelivered in the sender's record with its text's reference, and `status` lists it until it is sent again or withdrawn. (MSG-7) *(not yet met: N2)*
 
 **say(file) → OK | the findings**
-- **R4** A voluntary deterministic check of a draft for Bob: plain words, the thing named rather than its label, a link for what he should look at, a numbered list only for an act of his; it calls no model. (MSG-4, MSG-5)
+- **R4** A voluntary deterministic check of a draft for Bob: plain words, the thing named rather than its label, a link for what he should look at, a numbered list only for an act of his; it calls no model. (MSG-4, MSG-5) *(not yet met: N2)*
 
 **steps(file, source) → verified steps**
-- **R5** Steps for Bob are verified against the page they name, as today. (MSG-4; P20)
+- **R5** Steps for Bob are verified against the page they name, as today. (MSG-4; P20) *(not yet met: N2)*
 
 **reports / replies**
-- **R6** A product's flaw report reaches the process by the product's own state branch, read by the lane's account; the reply reaches the product by `main` of the process repository, read anonymously; neither needs the product's account to hold any role on the process repository. (MSG-6; PLT-13, PLT-14)
+- **R6** A product's flaw report reaches the process by the product's own state branch, read by the lane's account; the reply reaches the product by `main` of the process repository, read anonymously; neither needs the product's account to hold any role on the process repository. (MSG-6; PLT-13, PLT-14) *(not yet met: N2)*
 
 ## Private
 
@@ -38,8 +38,8 @@ Messages between sessions only wake: git carries the state. Messages to Bob are 
 
 ### Invariants
 
-- **R7** No Stop hook is written and nothing holds a session's turn; when Bob says stop, the session stops in that turn. (MSG-3; PLT-4)
-- **R8** No model judge sits in any path between a session's message and Bob. (MSG-5)
+- **R7** No Stop hook is written and nothing holds a session's turn; when Bob says stop, the session stops in that turn. (MSG-3; PLT-4) *(not yet met: N2)*
+- **R8** No model judge sits in any path between a session's message and Bob. (MSG-5) *(not yet met: N2)*
 
 ### Satisfies
 
