@@ -32,6 +32,7 @@
 //   job takein --branch job/<tranche>/<m> [--sha <commit>]      (issue 84: the job's own module's branch from an earlier round)
 //   job posted --module <m> [--comment <id>] [--ready]      review decide --module <m> (--review | --no-review) --reason "<…>"
 //   review result --module <m> --result-file <f>      merge --module <m> --head <sha> --gate <conclusion>      merged --module <m> --sha <commit>
+//   close merge --pr <n>      (the close pull request's merge call, only at CLOSING: main moves by nothing else)
 //   bob release      (a retiring BOB, once none of its workers runs; ROOT: --session <id> --failed "<get_session>"; issue 90)
 //   job reopen --module <m> --change-file <f>      job retire --module <m>      job archived --module <m> --session <id> --usage <json> | --unmeasured "<the refusal>"
 //   defect --module <m> --what "<…>"      bob archived --name "BOB #n" --session <id> --usage <json> [--tranche <T>]
@@ -67,8 +68,8 @@ import { Refused, processHead, versionCommand, ownerSecret, dispatch, grantsChec
 // The requirements module (layer 2): the requirements file's parser, service blocks, the mark strike, the measurement line, a job's reading set.
 import { readingSet, strike, budgetOf, overrun, MEASUREMENT_RULE } from './requirements.mjs';
 // The jobs module (layer 3): a job as a pull request; what later modules provide it is wired in here until they are extracted.
-import { wire, parseJob, fmtJob, jobOf, owedByJob, LIVE_JOB, MODEL, SET_TABLE, selfcheck, reviewBrief, staleJobs, layerStart, jobPr, jobStarted, jobRoute, jobStart, jobState, jobComplete, jobTakein, jobPosted, jobReopen, jobRetire, jobArchived, defect } from './jobs.mjs';
-export { parseJob, jobSession, SET_TABLE, SET_BUDGET, selfcheck, staleJobs, layerStart, jobPr, jobStarted, jobRoute, jobStart, jobState, jobComplete, jobTakein, jobPosted, jobReopen, jobRetire, jobArchived, defect } from './jobs.mjs';
+import { wire, parseJob, fmtJob, jobOf, owedByJob, LIVE_JOB, MODEL, SET_TABLE, selfcheck, reviewBrief, staleJobs, layerStart, jobPr, jobStarted, jobRoute, jobStart, jobState, jobComplete, jobTakein, jobPosted, jobReopen, jobRetire, jobArchived } from './jobs.mjs';
+export { parseJob, jobSession, SET_TABLE, SET_BUDGET, selfcheck, staleJobs, layerStart, jobPr, jobStarted, jobRoute, jobStart, jobState, jobComplete, jobTakein, jobPosted, jobReopen, jobRetire, jobArchived } from './jobs.mjs';
 wire({
   planEdit: (R, edit, message) => planEdit(R, edit, message), versionLine: (to) => versionLine(to), behind: (dir) => processBehind(dir),
   openAsks: (R, m) => asks(R).filter((a) => a.status !== 'CLOSED' && (a.from?.who.split(' #')[0].toLowerCase() === m || new RegExp(`\\b${m}\\b`).test(a.From?.body || ''))),
@@ -78,6 +79,10 @@ wire({
 import { tranche, trancheId, archivedTranche, roundOpen, roundClose, trancheCarry, trancheMerged, footprint, ruling, partialCheck, partial, place, report, stop, resume, trancheOpen, trancheClose as planTrancheClose } from './planning.mjs';
 export { tranche, trancheId, archivedTranche, PLAN_LIMIT, trancheOpen, roundOpen, roundClose, trancheCarry, trancheMerged, footprint, ruling, partial, partsOf, place, report, stop, resume } from './planning.mjs';
 export { versionCommand as versionCheck, GRANTS_FILE, GRANTS_PRODUCT, GRANTS_FRESH_H, EXPIRY_WARN_D } from './platform.mjs';
+// The integration module (layer 3, N2-27 to N2-29): the review, the merge and its record, the layer's close, the close
+// pull request's merge, retirement, a BOB's release and a defect.
+import { reviewDecide, reviewResult, merge, merged, layerClose, closeMerge, bobRelease, defect, WORKERS_FILE, runningWorkers } from './integration.mjs';
+export { reviewDecide, reviewResult, merge, merged, layerClose, closeMerge, bobRelease, defect, WORKERS_FILE, runningWorkers };
 
 export const PROCESS = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 export const LIMIT = 4096;                        // a handoff, a START, a charter, a brief (SESSIONS §6)
@@ -937,23 +942,7 @@ export function handoff(o) {
 }
 // The background tasks the session's Stop hook saw running at its last turn's end, plus every worker started since
 // (the PreToolUse hook adds it): measured #16, 30 Oct, the Stop hook's input lists them as `background_tasks`.
-export const WORKERS_FILE = 'proc-workers.json', TOOKOVER_FILE = 'proc-tookover.json';
-export const runningWorkers = (root, session) => { try { const w = JSON.parse(readFileSync(join(root, '.git', WORKERS_FILE), 'utf8')); return w.session === session ? w.running : null; } catch { return null; } };
-// issue 90: a retiring BOB released once none of its workers runs (BOB, its own), or one that failed (ROOT, from get_session)
-export function bobRelease(o) {
-  const R = repo(o.product), me = readRole(R.root), p = parsePlan(stateRead(R, 'plan.md') || '');
-  const who = me?.role === 'root' ? o.session : me?.role === 'bob' ? me.session : refuse('a retiring BOB releases itself; ROOT releases one only when get_session reads it failed or archived');
-  if (me?.role === 'root' && !o.failed) refuse('--session <the BOB> --failed "<what get_session reads>": ROOT releases only a BOB whose workers died with it');
-  const r = p.retiring.find((x) => x.session === who) ?? refuse(`${who} is not retiring: \`proc handoff\` records a BOB retiring`);
-  if (r.state === 'released') return { released: r.name, already: true };
-  if (me.role === 'bob') {
-    const run = runningWorkers(R.root, who);
-    if (run === null) refuse('your background tasks are not recorded yet: end this turn (the Stop hook records them), then run this again');
-    if (run.length) refuse(`${run.length} of your workers still run (${run.map((t) => t.description || t.id).join('; ')}): record each result as it arrives; your session stays until none runs`);
-  }
-  const commit = planEdit(R, (q) => ({ ...q, retiring: q.retiring.map((x) => (x.session === who ? { ...x, state: 'released' } : x)) }), `${r.name} released${o.failed ? ` (${String(o.failed).slice(0, 60)})` : ''}`);
-  return { released: r.name, commit, next: me.role === 'bob' ? `send ROOT (the session your start prompt names) the line "RELEASED ${r.name}": it archives you now` : `archive ${r.name} (${who}), then send its usage to the BOB in the plan's Status line` };
-}
+export const TOOKOVER_FILE = 'proc-tookover.json';
 
 // ---- the job's life (JOB-LIFE): one job, one pull request; the gate by tools/lib.mjs's functions ----
 // jobs/<m>.md on the state branch is written by BOB (layer start, job pr, job started, review, merge, merged, reopen,
@@ -961,153 +950,6 @@ export function bobRelease(o) {
 // the session exists and after it reads COMPLETE, the job between. Its START is `jobs/<m>/start.md` (the PR body is the
 // durable copy), its last report `jobs/<m>/report.md`.
 const PLAN = 'build/plan/current.md';
-const mod = (R, m) => modules(R).find((x) => x.id === m) ?? refuse(`no module ${m} in build/modules.json`);
-const jobPath = (m) => `jobs/${m}.md`;
-const loadJob = (R, m) => jobOf(R, m) ?? refuse(`no job for ${m} on the state branch`);
-const saveJob = (R, m, j, msg) => stateWrite(R, { [jobPath(m)]: fmtJob(m, j) }, msg);
-const done = (R, m) => ['MERGED', 'ARCHIVED'].includes(jobOf(R, m)?.state);
-function at(R, ref, fn) { const back = R.branch(), head = R.g(['rev-parse', 'HEAD']); R.g(['checkout', '-q', '--detach', ref]); try { return fn(); } finally { R.g(['checkout', '-q', back === 'HEAD' ? head : back]); } }
-// The concerns the tool lists mechanically (JOB-LIFE §5); BOB judges and writes the decision.
-function reviewConcerns(R, m, j) {
-  const out = [], x = mod(R, m), range = `origin/${TRANCHE}...origin/${jobBranch(m)}`;
-  R.fetch('main');
-  if (!(JSON.parse(R.remote('main', 'build/modules.json') || '{"modules":[]}').modules || []).some((y) => y.id === m)) out.push('new module (not on main)');
-  const stat = R.g(['diff', '--numstat', range]).split('\n').filter(Boolean).map((l) => l.split('\t'));
-  const changed = stat.reduce((n, [a, d]) => n + (Number(a) || 0) + (Number(d) || 0), 0);
-  if (changed > 400) out.push(`diff of ${changed} lines (over 400)`);
-  const exp = (x.paths || []).length ? R.g(['diff', range, '--', ...(x.paths || []).map(R.rel)]).split('\n').filter((l) => /^[+-]\s*export\b/.test(l)) : [];
-  if (exp.length) out.push(`provided service changed (${exp.length} export line(s) differ)`);
-  const sensitive = JSON.parse(R.read('build/modules.json') || '{}').sensitive || [];
-  const hit = stat.map((s) => s[2]).filter((f) => sensitive.some((p) => f === p || f.startsWith(p)));
-  if (hit.length) out.push(`sensitive path: ${hit.join(', ')}`);
-  const entries = ((stateRead(R, `jobs/${m}/start.md`) || '').match(/^- /gm) || []).length;
-  const ev = evidenceItems(stateRead(R, `jobs/${m}/report.md`) || '') || [];
-  if (ev.length < entries) out.push(`evidence thinner than the entries (${ev.length} item(s) for ${entries})`);
-  if (j.runs >= 3) out.push(`completion ${j.runs} (third or later)`);
-  return out;
-}
-// JOB-LIFE §5: review when there is a concern, else no review with the reason; a review is a fresh worker (Opus for a
-// new module, a changed provided service or a sensitive path; else Sonnet, high), dispatched in the background.
-export function reviewDecide(o) {
-  const R = repo(o.product), m = o.module; if (!m || !o.reason || !o.review === !o.noReview) refuse('--module <m> (--review | --no-review) --reason "<…>"');
-  const j = loadJob(R, m);
-  if (j.state !== 'COMPLETE') refuse(`${m} reads ${j.state}: a review is decided on COMPLETE`);
-  if (owedByJob(j).length) refuse(`${m} still owes: ${owedByJob(j).join('; ')}`);
-  if (j.review) refuse(`${m}'s review is decided: ${j.review}`);
-  R.fetch(TRANCHE, jobBranch(m));
-  const concerns = reviewConcerns(R, m, j), note = `concerns: ${concerns.join('; ') || 'none'}`;
-  if (o.noReview) return { commit: saveJob(R, m, { ...j, review: `no review · ${o.reason} · ${note}` }, `${m}: no review`), concerns };
-  const model = concerns.some((c) => /^new module|^provided service|^sensitive/.test(c)) ? 'opus' : 'sonnet';
-  const result = join(R.root, '.git', `proc-review-${m}.md`), { id: T } = tranche(R);
-  const brief = reviewBrief(R, m, { by: parsePlan(stateRead(R, 'plan.md') || '').bob?.name ?? 'BOB', pr: j.pr, T, why: `${o.reason}; ${note}`, diff: `git -C ${R.root} diff origin/${TRANCHE}...origin/${jobBranch(m)}`, report: `git -C ${R.root} show origin/${stateBranch(needEpoch(R))}:jobs/${m}/report.md`, result, model });
-  const commit = stateWrite(R, { [jobPath(m)]: fmtJob(m, { ...j, reviews: (j.reviews || 0) + 1, review: `review · ${o.reason} · ${note} · working since ${now()}` }), [`jobs/${m}/review-brief.md`]: brief }, `${m}: review dispatched`);
-  return { commit, concerns, agent: { description: `review ${m}`, prompt: brief, run_in_background: true, model: MODEL[model], effort: 'high' }, then: `proc review result --module ${m} --result-file ${result}` };
-}
-// The worker's verdict recorded; the PR review printed; on gaps, the CHANGE to the job.
-export function reviewResult(o) {
-  const R = repo(o.product), m = o.module; if (!m) refuse('--module <m> --result-file <f>');
-  const j = loadJob(R, m);
-  if (!/^review · .* · working since /.test(j.review || '')) refuse(`${m} has no review out (${j.review ?? 'none decided'})`);
-  const text = fileText(o.resultFile, '--result-file');
-  const verdict = text.match(/^VERDICT · (approve|gaps)$/m)?.[1] ?? refuse('the result\'s first line is `VERDICT · approve` or `VERDICT · gaps`');
-  if (!new RegExp(`^DONE review-${m} · `, 'm').test(text)) refuse(`the result lacks its DONE line: the worker failed; re-dispatch it from jobs/${m}/review-brief.md (SESSIONS §4)`);
-  const gaps = text.split('\n').filter((l) => /^- R\d+ · /.test(l));
-  if (verdict === 'gaps' && !gaps.length) refuse('VERDICT · gaps with no `- R<id> · …` line');
-  const review = j.review.replace(/ · working since .*$/, ` · ${verdict === 'approve' ? 'approved' : `gaps: ${gaps.length}`} · ${today()}`);
-  const commit = stateWrite(R, { [jobPath(m)]: fmtJob(m, { ...j, review }), [`jobs/${m}/review.md`]: text }, `${m}: review ${verdict}`);
-  // Posted as a COMMENT review carrying the verdict: GitHub refuses REQUEST_CHANGES and APPROVE on one's own pull request,
-  // and every session is Bob's one user (BOB #1's R-BOB-1-3, 29 Oct); the approval the merge reads is the Review line.
-  const out = { commit, verdict, post: { tool: 'pull_request_review_write', ...ghRepo(R), pullNumber: j.pr, method: 'create', event: 'COMMENT', body: `${verdict === 'approve' ? 'APPROVED by the review' : 'CHANGES REQUESTED by the review'} (${review.split(' · ')[1]})\n\n${text}` } };
-  if (verdict === 'gaps') out.send = { session_id: j.session, message: `CHANGE: the review found ${gaps.length} gap(s) against your requirements; fix each, then complete again:\n${gaps.join('\n')}` };
-  return out;
-}
-// JOB-LIFE §6: refuses unless COMPLETE with nothing owed, the review decided (and approved if one ran) and the plan's
-// order met; then, from the check event BOB received (`--head`, `--gate`): the gate must have succeeded on the PR's tip
-// (never an older commit), and the tip must hold everything on the tranche; a branch behind it is updated (GitHub merges
-// the tranche in, the gate runs again, the next success event brings BOB back here); a green, current tip is merged by the
-// printed call, owed until `merged` records it. Measured 29 Oct (#5): a required check on `tranche` refuses every direct
-// push, so the ruleset carries no check and this command is the gate's enforcement (code, P16).
-export function merge(o) {
-  const R = repo(o.product), m = o.module; if (!m) refuse('--module <m> --head <sha> --gate <conclusion> (both from the check event)');
-  const j = loadJob(R, m);
-  if (j.state !== 'COMPLETE') refuse(`${m} reads ${j.state}: a merge follows COMPLETE`);
-  if (j.owed.length) refuse(`${m} still owes: ${j.owed.join('; ')}`);   // `ready after` included: the PR is a draft until BOB marks it
-  if (!j.review) refuse(`decide the review first (proc review decide --module ${m})`);
-  if (/^review · /.test(j.review) && !/ · approved · /.test(j.review)) refuse(`${m}'s review is not approved: ${j.review}`);
-  if (/^(merging|merged)/.test(j.merge || '')) refuse(`${m} is already ${j.merge}`);
-  const waits = j.after.filter((a) => !done(R, a));
-  if (waits.length) refuse(`${m} merges after ${waits.join(', ')} (the plan's order)`);
-  if (!/^[0-9a-f]{7,40}$/.test(String(o.head || '')) || !o.gate) refuse('--head <sha the check ran on> --gate <its conclusion>, from the check event (JOB-LIFE §6)');
-  R.fetch(TRANCHE, jobBranch(m));
-  let head; try { head = R.g(['rev-parse', `origin/${jobBranch(m)}`]); } catch { refuse(`${jobBranch(m)} is not on origin`); }
-  if (!head.startsWith(String(o.head))) refuse(`${jobBranch(m)} is at ${head.slice(0, 7)}, not ${String(o.head).slice(0, 7)}: that result is for an older commit; wait for the run on the tip`);
-  if (o.gate !== 'success') refuse(`the gate concluded "${o.gate}" on ${head.slice(0, 7)}: nothing merges red; send the job a CHANGE naming the failing check (JOB-LIFE §6)`);
-  let behind = false; try { R.g(['merge-base', '--is-ancestor', `origin/${TRANCHE}`, head]); } catch { behind = true; }
-  const passed = behind ? gateNeutral(R, m, head) : null;   // issue 86: the tranche moved only by record files the gate does not read for m
-  if (behind && passed.held.length) {
-    const commit = saveJob(R, m, { ...j, merge: `updating ${now()}` }, `${m}: behind ${TRANCHE}, branch updated`);
-    return { commit, update: { tool: 'update_pull_request_branch', ...ghRepo(R), pullNumber: j.pr }, held: passed.held, then: `the gate runs on the updated tip; on its success event, proc merge --module ${m} again with the new head` };
-  }
-  const commit = saveJob(R, m, { ...j, merge: `merging ${head.slice(0, 7)} ${now()}` }, `${m}: merging ${head.slice(0, 7)}${behind ? `, over ${passed.files.length} record file(s) on ${TRANCHE} (JOB-LIFE §6)` : ''}`);
-  planEdit(R, (p) => owe(p, [`merge ${m}`]), `owed: merge ${m}`);
-  return { commit, merge: { tool: 'merge_pull_request', ...ghRepo(R), pullNumber: j.pr, merge_method: 'merge' }, ...(behind ? { over: passed.files } : {}), then: `proc merged --module ${m} --sha <merge commit> (on the pull_request.closed event)` };
-}
-// The merge recorded from its event: the commit is on the tranche and holds the job's tip; MERGED; the branch deleted
-// (JOB-LIFE §1); the job told; the PRs waiting on this module marked ready.
-export function merged(o) {
-  const R = repo(o.product), m = o.module, sha = String(o.sha || ''); if (!m || !/^[0-9a-f]{7,40}$/.test(sha)) refuse('--module <m> --sha <merge commit>');
-  const j = loadJob(R, m);
-  if (!/^merging/.test(j.merge || '')) refuse(`${m} is not merging (${j.merge ?? 'no merge'}): run proc merge first`);
-  R.fetch(TRANCHE, jobBranch(m));
-  let full; try { full = R.g(['rev-parse', '--verify', `${sha}^{commit}`]); } catch { refuse(`${sha}: not a commit this clone sees after fetching ${TRANCHE}`); }
-  try { R.g(['merge-base', '--is-ancestor', full, `origin/${TRANCHE}`]); } catch { refuse(`${sha} is not on ${TRANCHE}`); }
-  let head = null; try { head = R.g(['rev-parse', `origin/${jobBranch(m)}`]); } catch { /* already gone */ }
-  if (head) { try { R.g(['merge-base', '--is-ancestor', head, full]); } catch { refuse(`${jobBranch(m)}'s tip ${head.slice(0, 7)} is not in ${sha}: not this job's merge`); } }
-  const commit = saveJob(R, m, { ...j, state: 'MERGED', merge: `merged ${full.slice(0, 7)} ${today()}`, merges: [...(j.merges || []), `${full.slice(0, 7)} ${today()} reviews:${j.reviews || 0}`] }, `${m}: MERGED ${full.slice(0, 7)}`);
-  planEdit(R, (p) => clear(p, `merge ${m}`), `${m} merged`);
-  // The merged branch's delete (JOB-LIFE §1) is tried from here and, where the proxy refuses ref deletes (R-BOB-1-2), done
-  // by the product's prune workflow (REP 4), whose dispatch is printed; a merged branch left behind is harmless meanwhile
-  // (jobBranchAt builds over it, nothing reads it).
-  const prune = head ? pruneRef(R, jobBranch(m)) : null;
-  const ready = [];
-  for (const p of jobFiles(R)) {
-    const om = p.slice(5, -3), other = parseJob(stateRead(R, p) || ''), w = other?.owed.find((x) => /^ready after /.test(x));
-    if (!w || !other.pr) continue;
-    const rest = w.slice('ready after '.length).split(/,\s*/).filter((a) => a !== m && !done(R, a));
-    if (!rest.length) ready.push({ module: om, mark: { tool: 'update_pull_request', ...ghRepo(R), pullNumber: other.pr, draft: false }, then: `proc job posted --module ${om} --ready` });
-  }
-  return { commit, prune, send: j.session ? { session_id: j.session, message: `MERGED: ${m} is on ${TRANCHE} at ${full.slice(0, 7)} (PR #${j.pr}).` } : null, ready };
-}
-// Every job of the layer merged; the artifacts regenerated and verified; every check over the product, judged against
-// the tranche as it opened; the layer CLOSED; the live jobs' archives owed (JOB-LIFE §8; rulebook INT 7).
-export function layerClose(o) {
-  const R = repo(o.product), L = Number(o.layer); if (!L) refuse('--layer <n>');
-  on(R, TRANCHE);
-  const plan = parsePlan(stateRead(R, 'plan.md') || '');
-  if (plan.layers[L] !== 'STARTED') refuse(`layer ${L} is ${plan.layers[L] || 'not started'}`);
-  const { text } = tranche(R);
-  const jobs = modules(R).filter((m) => m.layer === L && entriesOf(text, L, m.id)).map((m) => [m.id, jobOf(R, m.id)]);
-  const open = jobs.filter(([, j]) => !j || !['MERGED', 'ARCHIVED'].includes(j.state));
-  if (open.length) refuse(`layer ${L}: ${open.map(([m, j]) => `${m} ${j ? j.state : 'no job'}`).join('; ')}`);
-  R.fetch(TRANCHE);
-  try { R.g(['merge-base', '--is-ancestor', `origin/${TRANCHE}`, 'HEAD']); } catch { refuse(`the checkout is behind origin/${TRANCHE}: pull first`); }
-  if (unpushed(R).length) refuse(`the tranche checkout is not pushed: ${unpushed(R).join('; ')}`);
-  const sh = (c) => spawnSync('sh', ['-c', c], { cwd: R.dir, encoding: 'utf8' }), list = artifacts(R), stale = [];
-  for (const a of list) { sh(a.regen); if (sh(a.verify).status !== 0) stale.push(a.path); }
-  if (stale.length) refuse(`artifacts stale after regenerating: ${stale.join(', ')}`);
-  const changed = list.flatMap((a) => a.paths.filter((p) => { try { R.g(['diff', '--quiet', '--', R.rel(p)]); return false; } catch { return true; } }));
-  const commit = changed.length ? commitPush(R, TRANCHE, changed, `artifacts regenerated at layer ${L}'s close: ${changed.join(', ')}`) : null;
-  const found = allChecks(R);
-  if (found.fails.size) {
-    R.fetch('main');
-    const start = history(R, 'origin/main', 'HEAD') ?? refuse('the tranche shares no history with main');
-    const old = at(R, start, () => allChecks(R)).fails, added = [...found.fails].filter((x) => !old.has(x));
-    if (added.length) refuse(`checks: ${added.length} finding(s) new since the tranche opened: ${added.slice(0, 10).join('; ')}`);
-  }
-  const live = jobs.filter(([, j]) => j.state === 'MERGED' && j.session);
-  planEdit(R, (p) => ({ ...owe(p, live.map(([m]) => `archive ${m}`)), layers: { ...p.layers, [L]: 'CLOSED' } }), `layer ${L} closes`);
-  return { layer: L, commit, archive: live.map(([m, j]) => ({ module: m, session: j.session, then: `proc job archived --module ${m} --session ${j.session} --usage '<json>' (or --unmeasured "<the refusal>" if the archive is refused)` })) };
-}
 // A predecessor BOB archived (takeover's act): its BOB-final row, under the tranche it worked in (rulebook USE 2). The
 // tranche's last BOB is archived by ROOT after the close PR merged, when nothing may be pushed to the tranche (it is on
 // `main` whole, JOB-LIFE §1): its row is written by the next tranche's BOB with `--tranche <T>`, the closed one's id
@@ -1655,7 +1497,7 @@ export const COMMANDS = {
   'lane open': laneOpen, 'lane started': laneStarted, 'lane start': laneStart, 'lane state': laneState, 'lane charter': laneCharter, 'lane route': laneRoute, 'lane archived': laneArchived, 'lane close': laneClose,
   'layer start': layerStart, 'layer close': layerClose, 'job pr': jobPr, 'job started': jobStarted, 'job route': jobRoute, 'job start': jobStart, 'job state': jobState,
   'job complete': jobComplete, 'job takein': jobTakein, 'job posted': jobPosted, 'review decide': reviewDecide, 'review result': reviewResult, merge, merged,
-  'job reopen': jobReopen, 'job retire': jobRetire, 'job archived': jobArchived, defect, 'bob archived': bobArchived, 'bob release': bobRelease,
+  'job reopen': jobReopen, 'job retire': jobRetire, 'close merge': closeMerge, 'job archived': jobArchived, defect, 'bob archived': bobArchived, 'bob release': bobRelease,
   reading, gate: gateCmd, shims,
   'tranche open': trancheOpen, 'tranche carry': trancheCarry, 'round open': roundOpen, 'round close': roundClose, 'tranche close': trancheClose, 'tranche merged': trancheMerged, footprint,
   'tranche report': report, stop, resume, place,

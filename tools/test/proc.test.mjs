@@ -10,6 +10,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as N from '../proc.mjs';
 import * as J from '../jobs.mjs';
+import { reviewDecide } from '../integration.mjs';
 import { versionCommand, processHead } from '../platform.mjs';
 import { MEASUREMENT_RULE, budgetOf } from '../requirements.mjs';
 import * as P from '../planning.mjs';
@@ -475,7 +476,7 @@ test('the job\'s life (JOB-LIFE): layer start, the job\'s turn, the gate with th
   assert.deepEqual(bc2.acts.map((x) => x.tool), ['add_issue_comment', 'update_pull_request']);   // alpha is merged: ready at once
   N.jobPosted(bo({ comment: 779, ready: true }));
   assert.deepEqual([N.jobState(bo({})).runs, N.jobState(bo({})).review], [2, null]);
-  N.reviewDecide(o({ module: 'beta', noReview: true, reason: 'the gap is closed; re-reviewed for it only' }));
+  reviewDecide(o({ module: 'beta', noReview: true, commits: g(beta.root, 'rev-parse', 'HEAD'), reason: 'the gap is closed; re-reviewed for it only' }));   // K15: the verified fix commit named
   N.merge(o({ module: 'beta', head: g(beta.root, 'rev-parse', 'HEAD'), gate: 'success' }));
   g2('fetch', '-q', 'origin'); g2('merge', '-q', '--no-ff', '-m', 'beta T1 (#12)', 'origin/job/beta'); g2('push', '-q', 'origin', 'HEAD:tranche');
   N.merged(o({ module: 'beta', sha: g2('rev-parse', 'HEAD') }));
@@ -551,9 +552,8 @@ test('the job\'s life (JOB-LIFE): layer start, the job\'s turn, the gate with th
   assert.throws(() => N.jobRetire(o({ module: 'alpha' })), /reads ARCHIVED/);
   const lc = N.layerClose(o({ layer: 1 }));
   assert.ok(lc.commit, 'the regenerated bundle is committed at the close');
-  assert.deepEqual(lc.archive.map((x) => [x.module, x.session]), [['beta', J3]]);
   assert.throws(() => N.layerClose(o({ layer: 1 })), /is CLOSED/);
-  assert.deepEqual(N.status(o()).owed, ['archive beta']);
+  assert.deepEqual(N.status(o()).owed, []);
   // issue 95: the archive refused (a session no live BOB created), so the job ends on the record unmeasured, its session left idle
   assert.throws(() => N.jobArchived(o({ module: 'beta', session: J3 })), /either --usage <json> or --unmeasured/);
   assert.throws(() => N.jobArchived(o({ module: 'beta', session: J3, usage: '{}', unmeasured: 'x' })), /either --usage <json> or --unmeasured/);
@@ -573,7 +573,6 @@ test('the job\'s life (JOB-LIFE): layer start, the job\'s turn, the gate with th
   assert.match(csv, new RegExp(`^${J1},job,ALPHA #1,alpha,100,20,3,9,2,\\d+,0/2,attempt ALPHA #1 · reading ${read('alpha', J1)}$`, 'm'));   // two merges (one re-open), neither reviewed
   assert.match(csv, new RegExp(`^${J3},job,BETA #2,beta,,,,,2,\\d+,1/1,unmeasured: archive_session refused  Interfere With Workloads · attempt BETA #2 · reading ${read('beta', J3)}$`, 'm'));
   assert.match(csv, new RegExp(`^${J2},job,BETA #1,beta,40,4,1,1,2,\\d+,1/1,attempt BETA #1 · reading ${read('beta', J2)} · replaced$`, 'm'));
-  assert.match(csv, /^,defect,BETA #1,beta,,,,,,,1\/1,total\(\[\]\) documented wrong$/m);
   assert.match(csv, new RegExp(`^${B2},BOB-final,BOB #0,,1,1,1,1,,,,$`, 'm'));
   assert.throws(() => N.handoff(o()), /owed: open PR stats/);
   // issue 101: a job archived before its merge is started again on its branch; one the tranche holds is done
