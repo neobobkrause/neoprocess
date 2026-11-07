@@ -6,9 +6,16 @@
 // change, over all its legacy modules together, is a removal. Every added legacy line is listed, for BOB's review at the layer close.
 // A changed line that only removes tokens from the line it replaces (a dropped key, a lost import name) is a
 // removal, not an addition (bio K140): it is listed as EDITED, neither judged nor counted as added.
+// R5 (build/requirements/architecture.md): every finding carries its key, module, file and line (R3); git is reached
+// through record's repo only (N2-12), and the diff is read between commits, never from the working tree (R10).
 // Usage: node checks/ownership.mjs <product-root> <module> <base-ref> [head-ref]
 import { posix } from 'node:path';
-import { readModules, git, pathMatches, report, generatedPaths, isGenerated } from './lib.mjs';
+import { pathToFileURL } from 'node:url';
+import { snapshot, readModules, pathMatches, report, generatedPaths, isGenerated, finder, texts } from './lib.mjs';
+
+// git diff between two refs for the product's own paths: `--relative` to the product's directory, which may sit inside its
+// repository; a file is named product-relative and given to git repository-relative.
+const diffOf = (S, args, file) => S.git(['diff', ...args, '--no-renames', S.prefix === '.' ? '--relative' : `--relative=${S.prefix}/`, ...(file === undefined ? ['--', S.prefix === '.' ? '.' : S.prefix] : ['--', S.at(file)])]);
 
 // Static imports and re-exports (`import … from`, `export … from`, `import '…'`).
 const STATEMENT = /(^|\n)([ \t]*)(import|export)(\s*[\w$*{}\s,]*?\s*from\s*|\s*)(['"])([^'"\n]+)\5/g;
@@ -42,8 +49,8 @@ export function statementsOf(text) {
 const STRUCTURAL = (t) => /^[\s{}()[\];,]*$/.test(t.replace(/\/\*.*?\*\//g, '').replace(/\/\/.*$/, '').replace(/^\s*(\/\*|\*).*$/, ''));
 
 // Added and removed lines of `file` between the refs, grouped by diff hunk, and the number of removed lines.
-function hunksOf(root, ref, head, file) {
-  const diff = git(root, ['diff', '-U0', '--no-renames', '--relative', `${ref}...${head}`, '--', file]);
+function hunksOf(S, ref, head, file) {
+  const diff = diffOf(S, ['-U0', `${ref}...${head}`], file);
   const hunks = [];
   let cur = null, n = 0, removed = 0;
   for (const line of diff.split('\n')) {
@@ -88,8 +95,10 @@ export function removalEdits(hunk) {
 
 // The lines a job added to one legacy file, judged against the job's own paths.
 export function judgeLegacyFile(root, ref, head, file, own) {
-  const failures = [], added = [], edited = [];
-  const text = git(root, ['show', `${head}:./${file}`]);
+  const S = snapshot(root);
+  const { findings, add } = finder('ownership');
+  const added = [], edited = [];
+  const text = S.git(['show', `${head}:${S.at(file)}`]);
   const isOwn = (spec) => {
     if (!spec.startsWith('.')) return false;
     const t = posix.normalize(posix.join(posix.dirname(file), spec));
@@ -101,7 +110,7 @@ export function judgeLegacyFile(root, ref, head, file, own) {
   const esc = (x) => x.replace(/\$/g, '\\$');
   const usesOwn = ownNames.length ? new RegExp(`(^|[^\\w$.]|\\.\\.\\.)(${ownNames.map(esc).join('|')})(?![\\w$])`) : null;
   const dynamicOwn = (t) => [...t.matchAll(/\bimport\s*\(\s*(['"])([^'"]+)\1/g)].some((m) => isOwn(m[2]));
-  const { hunks, removed } = hunksOf(root, ref, head, file);
+  const { hunks, removed } = hunksOf(S, ref, head, file);
   let count = 0;
   for (const h of hunks) {
     const code = [];
@@ -115,16 +124,16 @@ export function judgeLegacyFile(root, ref, head, file, own) {
       added.push(`${file}:${l.n}  ${l.text.trim()}`);
       const s = inStmt(l.n);
       if (s) {
-        if (!isOwn(s.spec)) failures.push(`${file}:${l.n}: adds to an import or re-export of ${s.spec}, which is not the module's own`);
+        if (!isOwn(s.spec)) add('legacy-import', { file, line: l.n, spec: s.spec }, `${file}:${l.n}: adds to an import or re-export of ${s.spec}, which is not the module's own`);
         continue;
       }
       if (STRUCTURAL(l.text)) continue;
       code.push(l.n);
       if ((usesOwn && usesOwn.test(l.text)) || dynamicOwn(l.text)) uses = true;
     }
-    if (code.length && !uses) failures.push(`${file}:${code[0]}-${code[code.length - 1]}: added lines that neither import from nor use the module's own paths`);
+    if (code.length && !uses) add('legacy-unrelated', { file, line: code[0], last: code[code.length - 1] }, `${file}:${code[0]}-${code[code.length - 1]}: added lines that neither import from nor use the module's own paths`);
   }
-  return { failures, added, edited, count, removed };
+  return { findings, failures: texts(findings), added, edited, count, removed };
 }
 
 // The job strikes its own marks (JOB-LIFE §3; P7): in `build/requirements/<module>.md` a job may remove a
@@ -134,15 +143,16 @@ const MARK = /\s*\*\(not yet met:([^)]*)\)\*/g;
 const marksOf = (line) => [...line.matchAll(MARK)].flatMap((x) => x[1].split(/[\s,;]+/).filter(Boolean));
 const bare = (line) => line.replace(MARK, '').replace(/\s+/g, ' ').trim();
 export function strikeFailures(root, ref, head, file) {
-  const diff = git(root, ['diff', '-U0', '--no-renames', '--relative', `${ref}...${head}`, '--', file]);
-  const failures = [];
+  const S = snapshot(root);
+  const diff = diffOf(S, ['-U0', `${ref}...${head}`], file);
+  const { findings, add } = finder('ownership');
   let gone = [], added = [], n = 0;
   const judge = () => {
     if (!gone.length && !added.length) return;
-    if (gone.length !== added.length) { failures.push(`${file}:${n}: ${added.length} line(s) added and ${gone.length} removed; a job only strikes its \`*(not yet met: T)*\` marks here`); }
+    if (gone.length !== added.length) { add('strike-lines', { file, line: n, added: added.length, removed: gone.length }, `${file}:${n}: ${added.length} line(s) added and ${gone.length} removed; a job only strikes its \`*(not yet met: T)*\` marks here`); }
     else for (let i = 0; i < gone.length; i++) {
       const before = marksOf(gone[i]), after = marksOf(added[i]);
-      if (bare(gone[i]) !== bare(added[i]) || after.some((x) => !before.includes(x)) || after.length >= before.length) failures.push(`${file}:${n + i}: changed beyond striking a \`*(not yet met: T)*\` mark: ${added[i].trim()}`);
+      if (bare(gone[i]) !== bare(added[i]) || after.some((x) => !before.includes(x)) || after.length >= before.length) add('strike-changed', { file, line: n + i }, `${file}:${n + i}: changed beyond striking a \`*(not yet met: T)*\` mark: ${added[i].trim()}`);
     }
     gone = []; added = [];
   };
@@ -153,53 +163,55 @@ export function strikeFailures(root, ref, head, file) {
     else if (line.startsWith('-') && !line.startsWith('---')) gone.push(line.slice(1));
   }
   judge();
-  return failures;
+  return findings;
 }
 
 export function checkOwnership(root, moduleId, base, head = 'HEAD') {
-  const state = readModules(root);
+  const S = snapshot(root, { ref: head });
+  const state = readModules(S);
+  const { findings, add } = finder('ownership');
   const m = state.modules.find((x) => x.id === moduleId);
-  if (!m) return { failures: [`${moduleId}: no such module in build/modules.json`], added: [], edited: [], summary: 'nothing checked' };
+  if (!m) { add('no-module', { module: moduleId, file: 'build/modules.json' }, `${moduleId}: no such module in build/modules.json`); return { findings, failures: texts(findings), added: [], edited: [], summary: 'nothing checked' }; }
   // `from` names one legacy module or several (a module's code may sit in more than one monolith).
   const legacies = [].concat(m.from || []).map((id) => state.modules.find((x) => x.id === id)).filter(Boolean);
   const own = [...(m.paths || []), ...(m.tests || [])];
   const record = new RegExp(`^build/jobs/[A-Z]+\\d+[a-z]?/${moduleId.replace(/[-]/g, '\\-')}\\.md$`);
-  const failures = [], added = [], edited = [];
+  const added = [], edited = [];
   // A generated artifact (rulebook REP 7) is no module's hand-written code: its committed copy is always the one the
   // merge regenerates, so a job's copy of it is never judged (bio K5583's revert of the word rows, BOB #327).
-  const gen = generatedPaths(root);
+  const gen = generatedPaths(S);
   const tally = new Map(legacies.map((l) => [l.id, { added: 0, removed: 0 }]));
   // A job's checkout often has only the remote-tracking branch (found in the D1 dry run): fall back to origin/<base>.
   let ref = base;
-  try { git(root, ['rev-parse', '--verify', '--quiet', `${base}^{commit}`]); } catch { ref = `origin/${base}`; }
-  const lines = git(root, ['diff', '--numstat', '--no-renames', '--relative', `${ref}...${head}`]).split('\n').filter(Boolean);
+  if (S.q(['rev-parse', '--verify', '--quiet', `${base}^{commit}`]) === null) ref = `origin/${base}`;
+  const lines = diffOf(S, ['--numstat', `${ref}...${head}`]).split('\n').filter(Boolean);
   for (const line of lines) {
     const [a, r, file] = line.split('\t');
     if (own.some((p) => pathMatches(p, file)) || record.test(file) || isGenerated(gen, file)) continue;
-    if (file === `build/requirements/${moduleId}.md`) { failures.push(...strikeFailures(root, ref, head, file)); continue; }
+    if (file === `build/requirements/${moduleId}.md`) { findings.push(...strikeFailures(S, ref, head, file).map((f) => ({ ...f, module: moduleId }))); continue; }
     const legacy = legacies.find((l) => (l.paths || []).some((p) => pathMatches(p, file)));
     if (legacy) {
       const t = tally.get(legacy.id);
       t.removed += Number(r) || 0;
       if (a === '0') continue;
-      const j = judgeLegacyFile(root, ref, head, file, m.paths || []);
-      failures.push(...j.failures);
+      const j = judgeLegacyFile(S, ref, head, file, m.paths || []);
+      findings.push(...j.findings.map((f) => ({ ...f, module: moduleId, legacy: legacy.id })));
       added.push(...j.added);
       edited.push(...j.edited);
       t.added += j.count;
       continue;
     }
-    failures.push(`${file}: outside ${moduleId}'s paths, tests and job record`);
+    add('outside', { module: moduleId, file }, `${file}: outside ${moduleId}'s paths, tests and job record`);
   }
   // The net change is judged over all the legacy modules together: the moved code and its caller may sit
   // in different ones (D5: the catalogue loses the code, the store gains the rewired call).
   const sum = [...tally.values()].reduce((s, t) => ({ added: s.added + t.added, removed: s.removed + t.removed }), { added: 0, removed: 0 });
-  if (sum.added && sum.added >= sum.removed) failures.push(`${[...tally.keys()].join(' + ')}: ${moduleId} adds ${sum.added} line(s) and removes ${sum.removed}; an extraction's net change to its legacy modules is a removal`);
+  if (sum.added && sum.added >= sum.removed) add('legacy-net', { module: moduleId, legacy: [...tally.keys()], added: sum.added, removed: sum.removed }, `${[...tally.keys()].join(' + ')}: ${moduleId} adds ${sum.added} line(s) and removes ${sum.removed}; an extraction's net change to its legacy modules is a removal`);
   const tail = [...tally].map(([id, t]) => `; ${id}: ${t.added} line(s) added, ${t.removed} removed`).join('');
-  return { failures, added, edited, summary: `${lines.length} files changed by ${moduleId} between ${base} and ${head}${tail}` };
+  return { findings, failures: texts(findings), added, edited, tally: Object.fromEntries(tally), summary: `${lines.length} files changed by ${moduleId} between ${base} and ${head}${tail}` };
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   const [root, mod, base, head] = process.argv.slice(2);
   if (!root || !mod || !base) { console.error('usage: node checks/ownership.mjs <product-root> <module> <base-ref> [head-ref]'); process.exit(2); }
   const { failures, added, edited, summary } = checkOwnership(root, mod, base, head);

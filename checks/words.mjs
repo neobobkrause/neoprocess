@@ -29,11 +29,15 @@
 //   unreviewed   only with `--release` (`checkWords(root, only, { release: true })`; run.mjs does not pass it): one failure per
 //                row of the `unreviewed` file `build/words.json` names ({unreviewed: [{id,en,module,file,line}]}),
 //                the design stream's review list, which must be empty at a release cut.
+// ARC-3, N2-10 (build/requirements/architecture.md R7): a `testcopy` or `testenglish` finding names the key the copied
+// sentence lives under (` -> key <key>`: the word table's key, or the id of the localize call that holds it), so the test
+// is rewritten to read it by that key. Every finding carries its key (the arm), module, file and line (R3), and the
+// check reads the product at a commit (R10).
 // Usage: node checks/words.mjs <product-root> [module ...] [--release]
-import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { readModules, trackedFiles, ownerIndex, notProduct, report } from './lib.mjs';
+import { snapshot, readModules, ownerIndex, notProduct, finder, report } from './lib.mjs';
 
 // The process names no product (Bob, 29 Oct): where a product keeps its words, and what its modules are called, come from
 // its own `build/words.json`, and the check runs only where that file exists (PRODUCT-SUPPLIES). Its keys:
@@ -46,9 +50,9 @@ import { readModules, trackedFiles, ownerIndex, notProduct, report } from './lib
 //   declModules  modules whose tests may list ops                     drawnPrefix, drawnModules  the drawn-screen modules
 export const WORDS_CONFIG = 'build/words.json';
 export function wordsConfig(root) {
-  const p = join(root, WORDS_CONFIG);
-  if (!existsSync(p)) return null;
-  const c = JSON.parse(readFileSync(p, 'utf8'));
+  const text = snapshot(root).read(WORDS_CONFIG);
+  if (text === null) return null;
+  const c = JSON.parse(text);
   const drawn = new Set(c.drawnModules || []);
   return { ...c, marker: c.marker || 'localize', own: new Set(c.wordsModule ? [c.wordsModule] : []), decl: new Set(c.declModules || []), drawn: (id) => (c.drawnPrefix ? id.startsWith(c.drawnPrefix) : false) || drawn.has(id) };
 }
@@ -309,9 +313,10 @@ function excerpt(v) {
 
 // ---- product knowledge ------------------------------------------------------------------------------------------------
 export function loadWords(root) {
-  const C = wordsConfig(root) || {}, p = C.table ? join(root, C.table) : null;
-  if (!p || !existsSync(p)) return { keys: new Set(), ens: new Map(), blob: '', codes: new Set(), codeKeys: new Set() };
-  const rows = JSON.parse(readFileSync(p, 'utf8')).words || [];
+  const S = snapshot(root);
+  const C = wordsConfig(S) || {}, table = C.table ? S.read(C.table) : null;
+  if (table === null) return { keys: new Set(), ens: new Map(), blob: '', codes: new Set(), codeKeys: new Set() };
+  const rows = JSON.parse(table).words || [];
   const keys = new Set(), ens = new Map(), codes = new Set();
   for (const r of rows) {
     keys.add(r.key);
@@ -321,23 +326,31 @@ export function loadWords(root) {
   }
   const blob = '\n' + [...ens.keys()].join('\n') + '\n';
   const codeKeys = new Set();
-  const g = C.rows ? join(root, C.rows) : null;
-  if (g && existsSync(g)) for (const m of readFileSync(g, 'utf8').matchAll(/^\s*\["([^"\\]+)",/gm)) codeKeys.add(m[1]);
+  const g = C.rows ? S.read(C.rows) : null;
+  if (g !== null) for (const m of g.matchAll(/^\s*\["([^"\\]+)",/gm)) codeKeys.add(m[1]);
   return { keys, ens, blob, codes, codeKeys };
+}
+// N2-10: the key a copied sentence lives under: the row whose `en` it is, or the first row whose `en` holds it.
+export function keyOf(words, text) {
+  if (words.ens.has(text)) return words.ens.get(text);
+  for (const [en, key] of words.ens) if (en.includes(text)) return key;
+  return null;
 }
 
 // op name -> owning module id (or null when the declarations give no owner). From `build/ops.json` (an array of names,
 // or an object name -> owner) and the product's op declarations: `OPS` names every op, `OP_FAMILIES[family].{kinds,acts,
 // proposals,reads,extra}` name the family's ops, and the family key is the owning module.
 export async function loadOpNames(root) {
+  const S = snapshot(root);
   const names = new Map();
-  const j = join(root, 'build/ops.json');
-  if (existsSync(j)) {
-    const d = JSON.parse(readFileSync(j, 'utf8'));
+  const j = S.read('build/ops.json');
+  if (j !== null) {
+    const d = JSON.parse(j);
     if (Array.isArray(d)) for (const x of d) names.set(x, null); else for (const [k, v] of Object.entries(d)) names.set(k, v);
   }
-  const od = (wordsConfig(root) || {}).opDeclarations, decl = od ? join(root, od) : null;
-  if (decl && existsSync(decl)) {
+  // The declarations are code: imported from the checkout only where its copy is the committed one (R10), else unread.
+  const od = (wordsConfig(S) || {}).opDeclarations, decl = od ? join(S.R.dir, od) : null;
+  if (decl && S.read(od) !== null && existsSync(decl) && readFileSync(decl, 'utf8') === S.read(od)) {
     try {
       const m = await import(pathToFileURL(decl).href);
       for (const k of Object.keys(m.OPS || {})) if (!names.has(k)) names.set(k, null);
@@ -352,21 +365,21 @@ export async function loadOpNames(root) {
 
 // The design's own list of inline strings no member reads (words-reads.json `unkeyed`), per module, placeholders normalised.
 export function loadUnkeyed(root) {
-  const r = (wordsConfig(root) || {}).reads, p = r ? join(root, r) : null;
+  const S = snapshot(root);
+  const r = (wordsConfig(S) || {}).reads, text = r ? S.read(r) : null;
   const out = new Map();
-  if (!p || !existsSync(p)) return out;
-  let j; try { j = JSON.parse(readFileSync(p, 'utf8')); } catch { return out; }
+  if (text === null) return out;
+  let j; try { j = JSON.parse(text); } catch { return out; }
   for (const [id, e] of Object.entries(j.modules || {})) {
     if ((e.unkeyed || []).length) out.set(id, '\n' + e.unkeyed.map((u) => String(u.text).replace(/\$?\{[^}]*\}/g, '{}')).join('\n') + '\n');
   }
   return out;
 }
 
-function generatedFromManifest(root) {
-  const p = join(root, 'build/manifest.md');
+function generatedFromManifest(S) {
   const files = new Set();
-  if (!existsSync(p)) return { files };
-  const text = readFileSync(p, 'utf8');
+  const text = S.read('build/manifest.md');
+  if (text === null) return { files };
   const at = text.indexOf('## Generated artifacts');
   if (at < 0) return { files };
   const rest = text.slice(at + 5), end = rest.search(/\n## /);
@@ -383,22 +396,6 @@ function isGeneratedText(src) {
   return /\bGENERATED\b|generated (by|from)\b|do not edit( it)? by hand|DO NOT EDIT/i.test(head);
 }
 
-function walk(root, rel) {
-  const abs = join(root, rel);
-  if (!existsSync(abs)) return [];
-  const st = statSync(abs);
-  if (st.isFile()) return [rel];
-  const out = [];
-  for (const e of readdirSync(abs, { withFileTypes: true })) {
-    if (e.name === 'node_modules' || e.name === '.git') continue;
-    out.push(...walk(root, rel === '.' ? e.name : join(rel, e.name)));
-  }
-  return out;
-}
-
-function listFiles(root) {
-  try { return trackedFiles(root); } catch { return walk(root, '.'); }
-}
 
 // ---- the check --------------------------------------------------------------------------------------------------------
 const ASSERTISH = /^assert|includes$|\.has$|^has$|match$|^ok$/;
@@ -406,33 +403,36 @@ const RX_CALLS = new Set(['match', 'doesNotMatch', 'test', 'exec', 'search']);
 // the prose fragments of a regex source: literal runs of 12+ characters with two words in them
 const rxFragments = (rx) => rx.replace(/\\(.)/g, '$1').split(/[\[\]()|?*+{}^$]|\.(?=[*+?])/).map((x) => x.trim()).filter((x) => /[A-Za-z]+ [A-Za-z]+/.test(x) && x.length >= 12);
 export function loadBaseline(root) {
-  const b = (wordsConfig(root) || {}).baseline, p = b ? join(root, b) : null;
-  if (!p || !existsSync(p)) return null;
-  try { const j = JSON.parse(readFileSync(p, 'utf8')); return { files: j.files || {} }; } catch { return { files: {} }; }
+  const S = snapshot(root);
+  const b = (wordsConfig(S) || {}).baseline, text = b ? S.read(b) : null;
+  if (text === null) return null;
+  try { const j = JSON.parse(text); return { files: j.files || {} }; } catch { return { files: {} }; }
 }
 
 export async function checkWords(root, only = [], { release = false, record = false } = {}) {
-  const C = wordsConfig(root) || NONE, MARKER = C.marker, DRAWN_MODULES = C.drawn, OWN_WORDS_MODULES = C.own, OWN_DECL_MODULES = C.decl;
+  const S = snapshot(root);
+  const C = wordsConfig(S) || NONE, MARKER = C.marker, DRAWN_MODULES = C.drawn, OWN_WORDS_MODULES = C.own, OWN_DECL_MODULES = C.decl;
   const READS_JSON = C.reads || null, UNREVIEWED_JSON = C.unreviewed || null;
-  const state = readModules(root);
-  const words = loadWords(root);
-  const ops = await loadOpNames(root);
+  const state = readModules(S);
+  const words = loadWords(S);
+  const ops = await loadOpNames(S);
   const owner = ownerIndex(state);
   const outside = notProduct(state);
-  const gen = generatedFromManifest(root);
-  const unkeyed = loadUnkeyed(root);
+  const gen = generatedFromManifest(S);
+  const unkeyed = loadUnkeyed(S);
   let designUnkeyed = 0; // inline strings on the design's unkeyed list, not counted (bio K3944)
-  const files = listFiles(root);
-  const failures = [];
+  const files = S.files;
+  const { findings, add: found } = finder('words');
   const counts = {}; // module -> arm -> n
   const bump = (m, arm, tag) => { const c = (counts[m] ??= { inline: 0, testenglish: 0, testcopy: 0, missingkey: 0, handlist: 0, marker: 0, unreviewed: 0, q: 0, plain: 0 }); c[arm]++; if (tag === '?') c.q++; if (tag === 'plain') c.plain++; };
   const items = []; // the failures with their full literal, for tools that analyse them
-  const add = (arm, m, file, line, tag, text, raw) => { items.push({ arm, module: m, file, line, tag, raw: raw ?? text }); failures.push(`${arm} ${m} ${file}:${line} ${tag ? `[${tag}] ` : ''}${text}`); bump(m, arm, tag); };
+  // `wordKey`: the key a copied sentence lives under (N2-10), named in the finding so the test reads it by that key
+  const add = (arm, m, file, line, tag, text, raw, wordKey = null, why = null) => { items.push({ arm, module: m, file, line, tag, raw: raw ?? text, wordKey }); found(arm, { module: m, file, line, tag: tag || null, wordKey, why, raw: raw ?? text }, `${arm} ${m} ${file}:${line} ${tag ? `[${tag}] ` : ''}${text}${wordKey ? ` -> key ${wordKey}` : ''}`); bump(m, arm, tag); };
   let literals = 0;
   let englishNow = null; // file -> count of testenglish candidates, for --baseline
   const tIds = new Map(); // t id -> { en, where } of its first use
   const tReads = new Set(); // the string tokens given as a t call's id and en
-  const codeEns = new Set(); // the en of every marker call in product source (bio K3962)
+  const codeEns = new Map(); // the en of every marker call in product source (bio K3962) -> its id
   const baseline = record ? { files: {} } : loadBaseline(root); // null: the arm is off until the product records one
   const engTests = []; // testenglish candidates: { m, f, line, frags }
   const codeTests = []; // test strings not yet judged against codeEns: { m, f, s }
@@ -447,7 +447,7 @@ export async function checkWords(root, only = [], { release = false, record = fa
   const declared = new Set();
   for (const f of files) {
     if (!CODE_EXT.test(f) || SKIP_DIR.test(f) || outside(f) || !owner(f)) continue;
-    let src; try { src = readFileSync(join(root, f), 'utf8'); } catch { continue; }
+    const src = S.read(f); if (src === null) continue;
     if (isGeneratedText(src)) continue;
     for (const m of src.matchAll(/(?<![\w.$])(?:localize|t)\(\s*(["'`])([A-Za-z][\w.-]*)\1\s*,/g)) declared.add(m[2]);
   }
@@ -460,8 +460,8 @@ export async function checkWords(root, only = [], { release = false, record = fa
     if (only.length && !only.includes(m.id)) continue;
     const isTest = o.role === 'tests';
     if (!isTest && OWN_WORDS_MODULES.has(m.id)) continue;
-    let src;
-    try { src = readFileSync(join(root, f), 'utf8'); } catch { continue; }
+    const src = S.read(f);
+    if (src === null) continue;
     if (!isTest && (gen.files.has(f) || isGeneratedText(src))) { const set = ownLits.get(m.id) ?? ownLits.set(m.id, new Set()).get(m.id); for (const t of scan(src)) if (t.t === 'str') set.add(t.v); continue; }
     if (isGeneratedText(src)) continue;
     modsSeen.add(m.id);
@@ -509,14 +509,14 @@ export async function checkWords(root, only = [], { release = false, record = fa
       const idOk = plain(a) && endsArg(toks[k + 3]), enOk = idOk && toks[k + 3].v === ',' && plain(b) && endsArg(toks[k + 5]);
       if (idOk) tReads.add(a);
       if (enOk) tReads.add(b);
-      if (enOk && !isTest) codeEns.add(b.v);
-      if (DRAWN_MODULES(m.id)) add('marker', m.id, f, t.line, '', `${MARKER} call in a drawn-screen module (read by word())`);
-      if (!idOk) { add('marker', m.id, f, t.line, '', `${MARKER} id is not a plain string literal`); continue; }
-      if (!KEY_RE.test(a.v)) add('marker', m.id, f, a.line, '', `${MARKER} id ${excerpt(a.v)} is not <module>.<area>.<name>`);
-      if (!enOk) { add('marker', m.id, f, t.line, '', `${MARKER}(${excerpt(a.v)}, en): en is not a plain string literal`); continue; }
+      if (enOk && !isTest && !codeEns.has(b.v)) codeEns.set(b.v, a.v);
+      if (DRAWN_MODULES(m.id)) add('marker', m.id, f, t.line, '', `${MARKER} call in a drawn-screen module (read by word())`, undefined, null, 'drawn');
+      if (!idOk) { add('marker', m.id, f, t.line, '', `${MARKER} id is not a plain string literal`, undefined, null, 'id-not-literal'); continue; }
+      if (!KEY_RE.test(a.v)) add('marker', m.id, f, a.line, '', `${MARKER} id ${excerpt(a.v)} is not <module>.<area>.<name>`, undefined, null, 'id-malformed');
+      if (!enOk) { add('marker', m.id, f, t.line, '', `${MARKER}(${excerpt(a.v)}, en): en is not a plain string literal`, undefined, null, 'en-not-literal'); continue; }
       const prev = tIds.get(a.v);
       if (!prev) tIds.set(a.v, { en: b.v, where: `${f}:${a.line}` });
-      else if (prev.en !== b.v) add('marker', m.id, f, a.line, '', `${MARKER} id ${excerpt(a.v)} has a different en than at ${prev.where}`);
+      else if (prev.en !== b.v) add('marker', m.id, f, a.line, '', `${MARKER} id ${excerpt(a.v)} has a different en than at ${prev.where}`, undefined, null, 'two-en');
     }
 
     if (isTest) {
@@ -528,12 +528,12 @@ export async function checkWords(root, only = [], { release = false, record = fa
         const v = s.v;
         if (s.interp) { // static chunks between placeholders
           let hit = false;
-          for (const chunk of v.split('{}')) if (chunk.length >= 25 && !chunk.includes('\n') && words.blob.includes(chunk)) { add('testcopy', m.id, f, s.line, '', excerpt(chunk)); hit = true; break; }
+          for (const chunk of v.split('{}')) if (chunk.length >= 25 && !chunk.includes('\n') && words.blob.includes(chunk)) { add('testcopy', m.id, f, s.line, '', excerpt(chunk), undefined, keyOf(words, chunk)); hit = true; break; }
           if (!hit) codeTests.push({ m: m.id, f, s });
           continue;
         }
-        if (words.ens.has(v) && isCopyLen(v)) add('testcopy', m.id, f, s.line, '', excerpt(v));
-        else if (v.length >= 25 && !v.includes('\n') && words.blob.includes(v)) add('testcopy', m.id, f, s.line, 'part', excerpt(v));
+        if (words.ens.has(v) && isCopyLen(v)) add('testcopy', m.id, f, s.line, '', excerpt(v), undefined, keyOf(words, v));
+        else if (v.length >= 25 && !v.includes('\n') && words.blob.includes(v)) add('testcopy', m.id, f, s.line, 'part', excerpt(v), undefined, keyOf(words, v));
         else codeTests.push({ m: m.id, f, s });
       }
       // testenglish candidates (bio K5426): an assertion-position sentence, or a regex given to a match/test call, whose prose is a
@@ -607,13 +607,14 @@ export async function checkWords(root, only = [], { release = false, record = fa
   // testcopy against the marker calls of product source (bio K3962), judged once every product file has been read
   // a substring copy holds a space: an identifier (a placeholder's or an export's name) is no sentence (bio K3967)
   if (codeEns.size) {
-    const codeBlob = '\n' + [...codeEns].join('\n') + '\n';
+    const codeBlob = '\n' + [...codeEns.keys()].join('\n') + '\n';
+    const idOf = (t) => codeEns.get(t) ?? [...codeEns].find(([en]) => en.includes(t))?.[1] ?? null;
     for (const { m, f, s } of codeTests) {
       if (s.ctx && s.ctx.assertMsg) continue;
       const v = s.v;
       if (s.interp) {
-        for (const chunk of v.split('{}')) if (chunk.length >= 25 && /\s/.test(chunk.trim()) && !chunk.includes('\n') && codeBlob.includes(chunk)) { add('testcopy', m, f, s.line, 'code', excerpt(chunk)); break; }
-      } else if ((codeEns.has(v) && isCopyLen(v)) || (v.length >= 25 && /\s/.test(v.trim()) && !v.includes('\n') && codeBlob.includes(v))) add('testcopy', m, f, s.line, 'code', excerpt(v));
+        for (const chunk of v.split('{}')) if (chunk.length >= 25 && /\s/.test(chunk.trim()) && !chunk.includes('\n') && codeBlob.includes(chunk)) { add('testcopy', m, f, s.line, 'code', excerpt(chunk), undefined, idOf(chunk)); break; }
+      } else if ((codeEns.has(v) && isCopyLen(v)) || (v.length >= 25 && /\s/.test(v.trim()) && !v.includes('\n') && codeBlob.includes(v))) add('testcopy', m, f, s.line, 'code', excerpt(v), undefined, idOf(v));
     }
   }
 
@@ -625,7 +626,7 @@ export async function checkWords(root, only = [], { release = false, record = fa
       const hit = items.filter(is);
       const foreign = hit.filter((x) => (kind === 'ops' && ops.get(x) ? ops.get(x) !== m : !own.has(x)));
       if (hit.length >= items.length * 0.8 && foreign.length >= 5) {
-        add('handlist', m, f, line, kind === 'keys' ? '' : '?', `${kind}: ${foreign.slice(0, 3).join(', ')}, ... (${foreign.length} of ${items.length} not the module's own)`);
+        add('handlist', m, f, line, kind === 'keys' ? '' : '?', `${kind}: ${foreign.slice(0, 3).join(', ')}, ... (${foreign.length} of ${items.length} not the module's own)`, undefined, null, kind);
         break;
       }
     }
@@ -647,17 +648,18 @@ export async function checkWords(root, only = [], { release = false, record = fa
       }
     }
   };
-  if (READS_JSON && existsSync(join(root, READS_JSON))) checkReads(READS_JSON, readFileSync(join(root, READS_JSON), 'utf8'));
+  if (READS_JSON && S.read(READS_JSON) !== null) checkReads(READS_JSON, S.read(READS_JSON));
   for (const f of files) if (basename(f) === 'words-reads.json' && f !== READS_JSON && !SKIP_DIR.test(f)) {
     const o = state.modules.find((x) => (x.paths || []).some((p) => (p.endsWith('/') ? f.startsWith(p) : p === f)));
-    if (o) checkReads(f, readFileSync(join(root, f), 'utf8'), o.id);
+    if (o) checkReads(f, S.read(f), o.id);
   }
 
-  if (release && UNREVIEWED_JSON && existsSync(join(root, UNREVIEWED_JSON))) {
-    let u = []; try { u = JSON.parse(readFileSync(join(root, UNREVIEWED_JSON), 'utf8')).unreviewed || []; } catch { /* unreadable: no rows */ }
+  if (release && UNREVIEWED_JSON && S.read(UNREVIEWED_JSON) !== null) {
+    let u = []; try { u = JSON.parse(S.read(UNREVIEWED_JSON)).unreviewed || []; } catch { /* unreadable: no rows */ }
     for (const r of u) if (!only.length || only.includes(r.module)) add('unreviewed', r.module, r.file, r.line, '', r.id);
   }
   // testenglish: the product's own literals are now all read; a candidate counts when a prose fragment is a word's value or product text
+  const idOfCode = (t) => codeEns.get(t) ?? [...codeEns].find(([en]) => en.includes(t))?.[1] ?? null;
   if (baseline) {
     const productBlob = '\n' + [...ownLits.values()].flatMap((x) => [...x]).join('\n') + '\n';
     const perFile = new Map();
@@ -665,15 +667,16 @@ export async function checkWords(root, only = [], { release = false, record = fa
     for (const [f, cs] of perFile) {
       const allowed = baseline.files[f] ?? 0;
       if (cs.length <= allowed) continue;
-      for (const c of cs) add('testenglish', c.m, f, c.line, allowed ? `grew ${allowed} to ${cs.length}` : 'new', excerpt(c.frags[0]));
+      for (const c of cs) add('testenglish', c.m, f, c.line, allowed ? `grew ${allowed} to ${cs.length}` : 'new', excerpt(c.frags[0]), undefined, c.frags.map((x) => keyOf(words, x) ?? idOfCode(x)).find(Boolean) ?? null);
     }
     englishNow = Object.fromEntries([...perFile].map(([f, cs]) => [f, cs.length]).sort());
   }
-  failures.sort();
+  findings.sort((a, b) => (a.finding < b.finding ? -1 : a.finding > b.finding ? 1 : 0));
+  const failures = findings.map((x) => x.finding);
   const tot = { inline: 0, testenglish: 0, testcopy: 0, missingkey: 0, handlist: 0, marker: 0, unreviewed: 0, q: 0, plain: 0 };
   for (const c of Object.values(counts)) for (const k of Object.keys(tot)) tot[k] += c[k];
   const summary = `${modsSeen.size} modules, ${literals} string literals read, ${words.keys.size} words; inline ${tot.inline}, plain ${tot.plain}, testcopy ${tot.testcopy}, missingkey ${tot.missingkey}, handlist ${tot.handlist} (${tot.q} tagged ?), marker ${tot.marker}${release ? `, unreviewed ${tot.unreviewed}` : ''}, dev ${dev}, unkeyed ${designUnkeyed}${baseline ? `, testenglish ${tot.testenglish}` : ''}`;
-  return { failures, summary, counts, totals: { ...tot, dev, unkeyed: designUnkeyed }, items, englishNow };
+  return { findings, failures, summary, counts, totals: { ...tot, dev, unkeyed: designUnkeyed }, items, englishNow };
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {

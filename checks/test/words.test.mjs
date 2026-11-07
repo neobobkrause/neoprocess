@@ -105,84 +105,88 @@ function product(files) {
   return root;
 }
 
-const has = (failures, arm, mod, file, line, tag) =>
-  failures.some((f) => f.startsWith(`${arm} ${mod} ${file}:${line} `) && (tag === undefined || (tag === '' ? !/^\S+ \S+ \S+ \[/.test(f) : f.includes(`[${tag}] `))));
+// Findings by their key (the arm) and fields, never by the sentence the check prints (R11).
+const at = (findings, arm, mod, file, line) => findings.filter((f) => f.key === arm && (mod === undefined || f.module === mod) && (file === undefined || f.file === file) && (line === undefined || f.line === line));
+const has = (findings, arm, mod, file, line, tag) =>
+  at(findings, arm, mod, file, line).some((f) => tag === undefined || (tag === '' ? f.tag === null : f.tag === tag));
+const show = (findings) => findings.map((f) => `${f.key} ${f.module} ${f.file}:${f.line} [${f.tag}]`).join('\n');
 
 test('inline: sentences, templates, copies and error messages are found; code-like strings, comments and logs are not', async () => {
-  const { failures } = await checkWords(product({}));
+  const { findings } = await checkWords(product({}));
   const F = 'src/viol/index.mjs';
-  assert.ok(has(failures, 'inline', 'viol', F, 3, ''), failures.join('\n'));
-  assert.ok(has(failures, 'inline', 'viol', F, 4, ''));
-  assert.ok(has(failures, 'inline', 'viol', F, 5, 'copy'));
-  for (const line of [2, 6, 7, 8, 9, 10, 11, 12, 13, 14]) assert.ok(!failures.some((f) => f.startsWith(`inline viol ${F}:${line} `)), `line ${line}: ${failures.join('\n')}`);
+  assert.ok(has(findings, 'inline', 'viol', F, 3, ''), show(findings));
+  assert.ok(has(findings, 'inline', 'viol', F, 4, ''));
+  assert.ok(has(findings, 'inline', 'viol', F, 5, 'copy'));
+  for (const line of [2, 6, 7, 8, 9, 10, 11, 12, 13, 14]) assert.equal(at(findings, 'inline', 'viol', F, line).length, 0, `line ${line}: ${show(findings)}`);
 });
 
 test('inline: the clean module, setup-words, generated files and fixtures are never reported', async () => {
-  const { failures } = await checkWords(product({}));
-  assert.ok(!failures.some((f) => / clean src\/clean/.test(f) || /^inline clean /.test(f)));
-  assert.ok(!failures.some((f) => /^inline setup-words /.test(f)));
-  assert.ok(!failures.some((f) => f.includes('words.generated.mjs') || f.includes('fixtures/')));
-  assert.ok(!failures.some((f) => /^(testcopy|missingkey|handlist) clean /.test(f)));
+  const { findings } = await checkWords(product({}));
+  assert.ok(!findings.some((f) => f.module === 'clean'), show(findings));
+  assert.equal(at(findings, 'inline', 'setup-words').length, 0);
+  assert.ok(!findings.some((f) => f.file.includes('words.generated.mjs') || f.file.includes('fixtures/')));
 });
 
 test('inline: a literal in a hand-written word table is tagged table', async () => {
   const root = product({ 'src/clean/words.mjs': 'export const W = { a: "Everyone who looks gets the same answer." };\n' });
-  const { failures } = await checkWords(root);
-  assert.ok(has(failures, 'inline', 'clean', 'src/clean/words.mjs', 1, 'table'), failures.join('\n'));
+  const { findings } = await checkWords(root);
+  assert.ok(has(findings, 'inline', 'clean', 'src/clean/words.mjs', 1, 'table'), show(findings));
 });
 
 test('testcopy: an exact copy and a 25+ character substring are found; titles, short pieces and keys are not', async () => {
-  const { failures } = await checkWords(product({}));
+  const { findings } = await checkWords(product({}));
   const T = 'test/viol/a.test.mjs';
-  assert.ok(has(failures, 'testcopy', 'viol', T, 5), failures.join('\n'));
-  assert.ok(has(failures, 'testcopy', 'viol', T, 7, 'part'));
-  for (const line of [4, 6, 8, 9, 10]) assert.ok(!failures.some((f) => f.startsWith(`testcopy viol ${T}:${line} `)), `line ${line}`);
+  assert.ok(has(findings, 'testcopy', 'viol', T, 5), show(findings));
+  assert.ok(has(findings, 'testcopy', 'viol', T, 7, 'part'));
+  for (const line of [4, 6, 8, 9, 10]) assert.equal(at(findings, 'testcopy', 'viol', T, line).length, 0, `line ${line}`);
 });
 
 test('missingkey: a literal key words.json lacks is found; a held key and a test of the refusal are not', async () => {
-  const { failures } = await checkWords(product({}));
-  assert.ok(has(failures, 'missingkey', 'viol', 'src/viol/index.mjs', 15), failures.join('\n'));
-  assert.ok(has(failures, 'missingkey', 'viol', 'test/viol/a.test.mjs', 11));
-  assert.ok(!failures.some((f) => f.startsWith('missingkey viol test/viol/a.test.mjs:9 ')));
-  assert.ok(!failures.some((f) => f.startsWith('missingkey clean ')));
+  const { findings } = await checkWords(product({}));
+  assert.ok(has(findings, 'missingkey', 'viol', 'src/viol/index.mjs', 15), show(findings));
+  assert.ok(has(findings, 'missingkey', 'viol', 'test/viol/a.test.mjs', 11));
+  assert.equal(at(findings, 'missingkey', 'viol', 'test/viol/a.test.mjs', 9).length, 0);
+  assert.equal(at(findings, 'missingkey', 'clean').length, 0);
 });
 
 test('missingkey: a key the generated word rows hold (a sentence written first in code) is not missing; one they lack is (bio K5579)', async () => {
   const rows = '/* GENERATED: do not edit by hand. */\nexport const WORD_ROWS = Object.freeze([\n  ["screen.home.title", "Home", null, null, false, "design"],\n  ["viol.code.first", "Written first in code.", null, null, false, "code"],\n]);\n';
   const t = ['import { word } from "../../src/setup-words/index.mjs";', 'export const held = word("viol.code.first");', 'export const gone = word("viol.code.never");', ''].join('\n');
-  const { failures } = await checkWords(product({ 'bio-plane/src/setup-words/rows.mjs': rows, 'test/viol/rows.test.mjs': t }));
-  assert.ok(!failures.some((f) => f.startsWith('missingkey viol test/viol/rows.test.mjs:2 ')), failures.join('\n'));
-  assert.ok(has(failures, 'missingkey', 'viol', 'test/viol/rows.test.mjs', 3), failures.join('\n'));
+  const { findings } = await checkWords(product({ 'bio-plane/src/setup-words/rows.mjs': rows, 'test/viol/rows.test.mjs': t }));
+  assert.equal(at(findings, 'missingkey', 'viol', 'test/viol/rows.test.mjs', 2).length, 0, show(findings));
+  assert.ok(has(findings, 'missingkey', 'viol', 'test/viol/rows.test.mjs', 3), show(findings));
 });
 
 test('missingkey: a key declared by a localize call in product source is not missing before the rows are regenerated (bio K5583)', async () => {
   const src = 'import { localize } from "../setup-words/index.mjs";\nexport const s = () => localize("viol.declared.here", "Declared in code first.");\n';
   const t = ['import { word } from "../../src/setup-words/index.mjs";', 'export const a = word("viol.declared.here");', 'export const b = word("viol.declared.nowhere");', ''].join('\n');
-  const { failures } = await checkWords(product({ 'src/viol/declared.mjs': src, 'test/viol/declared.test.mjs': t }));
-  assert.ok(!failures.some((f) => f.startsWith('missingkey viol test/viol/declared.test.mjs:2 ')), failures.join('\n'));
-  assert.ok(has(failures, 'missingkey', 'viol', 'test/viol/declared.test.mjs', 3), failures.join('\n'));
+  const { findings } = await checkWords(product({ 'src/viol/declared.mjs': src, 'test/viol/declared.test.mjs': t }));
+  assert.equal(at(findings, 'missingkey', 'viol', 'test/viol/declared.test.mjs', 2).length, 0, show(findings));
+  assert.ok(has(findings, 'missingkey', 'viol', 'test/viol/declared.test.mjs', 3), show(findings));
 });
 
 test('missingkey: a key listed in words-reads.json that words.json lacks is found', async () => {
   const reads = { modules: { viol: { reads: ['screen.home.title', 'screen.gone.away'], unkeyed: [] }, clean: { reads: ['screen.home.title'], unkeyed: [] } } };
-  const { failures } = await checkWords(product({ 'docs/development/ux-substrate/screens/words-reads.json': JSON.stringify(reads, null, 1) }));
-  assert.ok(failures.some((f) => /^missingkey viol docs\/development\/ux-substrate\/screens\/words-reads\.json:\d+ screen\.gone\.away$/.test(f)), failures.join('\n'));
-  assert.ok(!failures.some((f) => f.includes('words-reads.json') && f.includes('screen.home.title')));
+  const { findings } = await checkWords(product({ 'docs/development/ux-substrate/screens/words-reads.json': JSON.stringify(reads, null, 1) }));
+  const R = 'docs/development/ux-substrate/screens/words-reads.json';
+  assert.ok(at(findings, 'missingkey', 'viol', R).some((f) => f.raw === 'screen.gone.away' && Number.isInteger(f.line)), show(findings));
+  assert.ok(!at(findings, 'missingkey', undefined, R).some((f) => f.raw === 'screen.home.title'));
 });
 
 test('handlist: 5+ foreign ops, refusal codes and word keys are found; short lists, mixed lists and a module\'s own ops are not', async () => {
-  const { failures } = await checkWords(product({}));
+  const { findings } = await checkWords(product({}));
   const T = 'test/viol/a.test.mjs';
-  assert.ok(has(failures, 'handlist', 'viol', T, 13, '?') && failures.some((f) => f.includes(`${T}:13 [?] ops:`)), failures.join('\n'));
-  assert.ok(failures.some((f) => f.includes(`${T}:14 [?] codes:`)));
-  assert.ok(failures.some((f) => f.includes(`${T}:15 keys:`)) && has(failures, 'handlist', 'viol', T, 15, ''));
-  assert.ok(!failures.some((f) => f.startsWith(`handlist viol ${T}:16 `) || f.startsWith(`handlist viol ${T}:17 `)));
-  assert.ok(!failures.some((f) => f.startsWith('handlist owner ')));
+  const kind = (line) => at(findings, 'handlist', 'viol', T, line).map((f) => [f.tag, f.why]);
+  assert.deepEqual(kind(13), [['?', 'ops']], show(findings));
+  assert.deepEqual(kind(14), [['?', 'codes']]);
+  assert.deepEqual(kind(15), [[null, 'keys']]);
+  assert.deepEqual([...kind(16), ...kind(17)], []);
+  assert.equal(at(findings, 'handlist', 'owner').length, 0);
 });
 
 test('a module argument limits the check to that module', async () => {
-  const { failures } = await checkWords(product({}), ['clean']);
-  assert.deepEqual(failures, []);
+  const { findings } = await checkWords(product({}), ['clean']);
+  assert.deepEqual(findings, []);
 });
 
 test('the scanner: comments, regexes and nested templates are skipped; lines are counted', () => {
@@ -219,29 +223,29 @@ test('inline: a stitched + chain whose joined text is a sentence fails once, tag
   });
   const r = await checkWords(root);
   const F = 'src/clean/index.mjs';
-  const mine = r.failures.filter((f) => f.startsWith('inline clean '));
-  assert.ok(has(r.failures, 'inline', 'clean', F, 2, 'stitched'), mine.join('\n'));
-  assert.ok(mine.some((f) => f.endsWith('"The mean of {} numbers is {}."')), mine.join('\n'));
-  assert.equal(mine.filter((f) => f.includes(`${F}:2 `)).length, 1);
-  assert.ok(!mine.some((f) => f.includes(`${F}:7 `)) && !mine.some((f) => f.includes(`${F}:3 `)) && !mine.some((f) => f.includes(`${F}:5 `)));
-  assert.ok(has(r.failures, 'inline', 'clean', F, 4, ''));
-  assert.ok(has(r.failures, 'inline', 'clean', F, 6, '?'));
-  assert.equal(mine.length, 3, mine.join('\n'));
+  const mine = at(r.findings, 'inline', 'clean');
+  assert.ok(has(r.findings, 'inline', 'clean', F, 2, 'stitched'), show(mine));
+  assert.ok(mine.some((f) => f.raw === 'The mean of {} numbers is {}.'), show(mine));
+  assert.equal(at(mine, 'inline', 'clean', F, 2).length, 1);
+  assert.equal([7, 3, 5].flatMap((l) => at(mine, 'inline', 'clean', F, l)).length, 0);
+  assert.ok(has(r.findings, 'inline', 'clean', F, 4, ''));
+  assert.ok(has(r.findings, 'inline', 'clean', F, 6, '?'));
+  assert.equal(mine.length, 3, show(mine));
   const only = await checkWords(root, ['clean']);
   assert.equal(only.totals.dev, 1);
-  assert.match(only.summary, /dev 1, unkeyed 0$/);
+  assert.equal(only.totals.unkeyed, 0);
 });
 
 // Words B (bio K3930; words-B-design §10): localize(id, en, vars) is a reading; the marker arm; --release.
-const mk = (m, f, line, extra) => (x) => x.startsWith(`marker ${m} ${f}:${line} `) && (!extra || x.includes(extra));
+const mk = (m, f, line, why) => (x) => x.key === 'marker' && x.module === m && x.file === f && x.line === line && (!why || x.why === why);
 test('localize: its id and en are never inline or testcopy findings; its id needs no row', async () => {
   const root = product({
     'src/clean/index.mjs': "import { localize } from '../setup-words/index.mjs';\nexport const a = localize('clean.index.nothing', 'There is nothing to add up yet.');\nexport const b = localize('clean.index.total', `The total is {total}.`, { total: 3 });\n",
     'test/clean/t.test.mjs': "import { localize } from '../../src/setup-words/index.mjs';\nconst x = localize('clean.index.nothing', 'There is nothing to add up yet.');\n",
   });
   const r = await checkWords(root, ['clean']);
-  assert.deepEqual(r.failures, [], r.failures.join('\n'));
-  assert.match(r.summary, /marker 0,/);
+  assert.deepEqual(r.findings, [], show(r.findings));
+  assert.equal(r.totals.marker, 0);
 });
 
 test('testcopy: an assertion\'s message argument is never a copy; the same text as the expected value still is (bio K4053)', async () => {
@@ -258,10 +262,10 @@ test('testcopy: an assertion\'s message argument is never a copy; the same text 
   });
   const r = await checkWords(root, ['clean']);
   const T = 'test/clean/msg.test.mjs';
-  const at = (line) => r.failures.filter((x) => x.startsWith(`testcopy clean ${T}:${line} `));
-  for (const line of [2, 3, 4]) assert.equal(at(line).length, 0, `line ${line}: ${at(line).join('; ')}`);
-  assert.equal(at(5).length, 1, r.failures.join('\n'));
-  assert.equal(at(6).length, 1, r.failures.join('\n'));
+  const on = (line) => at(r.findings, 'testcopy', 'clean', T, line);
+  for (const line of [2, 3, 4]) assert.equal(on(line).length, 0, `line ${line}: ${show(on(line))}`);
+  assert.equal(on(5).length, 1, show(r.findings));
+  assert.equal(on(6).length, 1, show(r.findings));
   assert.equal(r.totals.testcopy, 2);
 });
 
@@ -281,9 +285,11 @@ test('testcopy [code]: a test copying the en of a product localize call is found
   });
   const r = await checkWords(root, ['clean']);
   const T = 'test/clean/code.test.mjs';
-  assert.ok(r.failures.some((x) => x.startsWith(`testcopy clean ${T}:3 [code] `)), r.failures.join('\n'));
-  assert.ok(r.failures.some((x) => x.startsWith(`testcopy clean ${T}:4 [code] `)), r.failures.join('\n'));
-  for (const line of [5, 6, 7, 8]) assert.ok(!r.failures.some((x) => x.startsWith(`testcopy clean ${T}:${line} `)), `line ${line}`);
+  assert.ok(has(r.findings, 'testcopy', 'clean', T, 3, 'code'), show(r.findings));
+  assert.ok(has(r.findings, 'testcopy', 'clean', T, 4, 'code'), show(r.findings));
+  for (const line of [5, 6, 7, 8]) assert.equal(at(r.findings, 'testcopy', 'clean', T, line).length, 0, `line ${line}`);
+  // N2-10: each names the key the sentence lives under, the id of the localize call that holds it
+  assert.deepEqual([3, 4].map((l) => at(r.findings, 'testcopy', 'clean', T, l)[0].wordKey), ['m.a.b', 'm.a.c']);
   assert.equal(r.totals.testcopy, 2);
 });
 
@@ -295,7 +301,7 @@ test('localize: a localize bound to node:test (or any module but setup-words) is
     'test/clean/w.test.mjs': "import test from 'node:test';\ntest('R2: a t bound to node:test is plain code', () => {});\n",
   });
   const r = await checkWords(root, ['clean']);
-  assert.deepEqual(r.failures, [], r.failures.join('\n'));
+  assert.deepEqual(r.findings, [], show(r.findings));
 });
 
 test('marker: a non-literal id or en, a malformed id, one id with two en, and a marker call in a drawn-screen module fail', async () => {
@@ -322,30 +328,30 @@ test('marker: a non-literal id or en, a malformed id, one id with two en, and a 
     'src/viol/index.mjs': 'export const ok = 1;\n', 'test/viol/a.test.mjs': 'export const ok = 1;\n',
     'src/owner/index.mjs': 'export const ok = 1;\n', 'test/owner/a.test.mjs': 'export const ok = 1;\n',
   });
-  const { failures } = await checkWords(root, ['clean', 'screens-x']);
-  const m = failures.filter((f) => f.startsWith('marker '));
+  const { findings } = await checkWords(root, ['clean', 'screens-x']);
+  const m = at(findings, 'marker');
   const F = 'src/clean/index.mjs';
-  assert.equal(m.filter(mk('clean', F, 3)).length, 1, m.join('\n'));
+  assert.equal(m.filter(mk('clean', F, 3, 'two-en')).length, 1, show(m));
   assert.ok(!m.some(mk('clean', F, 2)) && !m.some(mk('clean', F, 4)));
-  for (const line of [5, 6, 7, 8]) assert.ok(m.some(mk('clean', F, line)), `line ${line}: ${m.join('\n')}`);
-  assert.ok(m.some(mk('screens-x', 'src/screens-x/index.mjs', 2, 'drawn-screen')), m.join('\n'));
-  assert.equal(m.length, 6, m.join('\n'));
+  for (const [line, why] of [[5, 'id-not-literal'], [6, 'en-not-literal'], [7, 'id-malformed'], [8, 'en-not-literal']]) assert.ok(m.some(mk('clean', F, line, why)), `line ${line}: ${show(m)}`);
+  assert.ok(m.some(mk('screens-x', 'src/screens-x/index.mjs', 2, 'drawn')), show(m));
+  assert.equal(m.length, 6, show(m));
 });
 
 test('--release: each row of words-unreviewed.json fails; without the flag none does', async () => {
   const U = { unreviewed: [{ id: 'clean.index.a', en: 'x', module: 'clean', file: 'src/clean/index.mjs', line: 4 }, { id: 'viol.index.b', en: 'y', module: 'viol', file: 'src/viol/index.mjs', line: 9 }] };
   const root = product({ 'bio-plane/src/setup-words/words-unreviewed.json': JSON.stringify(U) });
   const plain = await checkWords(root, ['clean']);
-  assert.ok(!plain.failures.some((f) => f.startsWith('unreviewed ')));
+  assert.equal(at(plain.findings, 'unreviewed').length, 0);
   const all = await checkWords(root, [], { release: true });
-  assert.deepEqual(all.failures.filter((f) => f.startsWith('unreviewed ')), ['unreviewed clean src/clean/index.mjs:4 clean.index.a', 'unreviewed viol src/viol/index.mjs:9 viol.index.b']);
-  assert.match(all.summary, /unreviewed 2,/);
+  assert.deepEqual(at(all.findings, 'unreviewed').map((f) => [f.module, f.file, f.line, f.raw]), [['clean', 'src/clean/index.mjs', 4, 'clean.index.a'], ['viol', 'src/viol/index.mjs', 9, 'viol.index.b']]);
+  assert.equal(all.totals.unreviewed, 2);
 });
 
 test('marker: the word list\'s own module (setup-words) may hold malformed marker calls in its tests', async () => {
   const root = product({ 'test/setup-words/x.test.mjs': "import { localize } from '../../src/setup-words/index.mjs';\nt(id, en);\nt('Bad', 'x');\n" });
   const r = await checkWords(root, ['setup-words']);
-  assert.deepEqual(r.failures.filter((f) => f.startsWith('marker ')), []);
+  assert.deepEqual(at(r.findings, 'marker'), []);
 });
 
 test('inline: a sentence on the design\'s unkeyed list (words-reads.json) is not counted, unless it copies a row (bio K3944)', async () => {
@@ -355,10 +361,10 @@ test('inline: a sentence on the design\'s unkeyed list (words-reads.json) is not
     'src/clean/index.mjs': "export const a = 'A builder reads this rationale about the rung, never a member.';\nexport const b = 'A member reads this sentence on the screen today.';\n",
   });
   const r = await checkWords(root, ['clean']);
-  const inl = r.failures.filter((f) => f.startsWith('inline '));
-  assert.equal(inl.length, 1, inl.join('\n'));
-  assert.ok(inl[0].includes(':2 '), inl[0]);
-  assert.match(r.summary, /unkeyed 1/);
+  const inl = at(r.findings, 'inline');
+  assert.equal(inl.length, 1, show(inl));
+  assert.equal(inl[0].line, 2);
+  assert.equal(r.totals.unkeyed, 1);
 });
 
 test('inline: a stitched chain whose joined text is on the design\'s unkeyed list is not counted; another still fails (UX-DESIGN U376)', async () => {
@@ -368,10 +374,10 @@ test('inline: a stitched chain whose joined text is on the design\'s unkeyed lis
     'src/clean/index.mjs': "export const a = (t, e) => t + '\\n## Session Log entry for the builders\\n\\n' + e + '\\n';\nexport const b = (n) => 'The record could not be read, so ' + n + ' items were not shown.';\n",
   });
   const r = await checkWords(root, ['clean']);
-  const inl = r.failures.filter((f) => f.startsWith('inline '));
-  assert.equal(inl.length, 1, inl.join('\n'));
-  assert.ok(inl[0].includes(':2 ') && inl[0].includes('stitched'), inl[0]);
-  assert.match(r.summary, /unkeyed 1/);
+  const inl = at(r.findings, 'inline');
+  assert.equal(inl.length, 1, show(inl));
+  assert.deepEqual([inl[0].line, inl[0].tag], [2, 'stitched']);
+  assert.equal(r.totals.unkeyed, 1);
 });
 
 test('inline: a row copy the design\'s unkeyed list names is not counted; an unlisted copy still is (bio K4038; UX-DESIGN U380)', async () => {
@@ -381,10 +387,10 @@ test('inline: a row copy the design\'s unkeyed list names is not counted; an unl
     'src/clean/index.mjs': "export const a = 'Nothing by that name is held here.';\nexport const b = 'That date is not one we can read.';\n",
   });
   const r = await checkWords(root, ['clean']);
-  const inl = r.failures.filter((f) => f.startsWith('inline '));
-  assert.equal(inl.length, 1, inl.join('\n'));
-  assert.ok(inl[0].includes(':2 ') && inl[0].includes('copy'), inl[0]);
-  assert.match(r.summary, /unkeyed 1/);
+  const inl = at(r.findings, 'inline');
+  assert.equal(inl.length, 1, show(inl));
+  assert.deepEqual([inl[0].line, inl[0].tag], [2, 'copy']);
+  assert.equal(r.totals.unkeyed, 1);
 });
 
 // The plain arm (bio K3957): lowercase, unpunctuated prose of 5+ words is an inline finding tagged plain.
@@ -409,10 +415,10 @@ test('inline: a lowercase unpunctuated reason of 5+ words is tagged plain; contr
     'test/clean/b.test.mjs': 'export const k = { why: "no profile states how long minutes take" };\n',   // a test file
   });
   const r = await checkWords(root, ['clean']);
-  const inl = r.failures.filter((f) => f.startsWith('inline '));
-  assert.equal(inl.length, 1, inl.join('\n'));
-  assert.ok(inl[0].includes('src/clean/index.mjs:2 [plain] '), inl[0]);
-  assert.match(r.summary, /inline 1, plain 1,/);
+  const inl = at(r.findings, 'inline');
+  assert.equal(inl.length, 1, show(inl));
+  assert.deepEqual([inl[0].file, inl[0].line, inl[0].tag], ['src/clean/index.mjs', 2, 'plain']);
+  assert.equal(r.totals.inline, 1);
   assert.equal(r.totals.plain, 1);
 });
 
@@ -444,15 +450,15 @@ test('inline: a + chain of pure literals is one literal at its first line; chain
   });
   const r = await checkWords(root, ['clean']);
   const F = 'src/clean/index.mjs';
-  const mine = r.failures.filter((x) => x.startsWith('inline clean '));
-  assert.ok(has(r.failures, 'inline', 'clean', F, 2, ''), mine.join('\n'));
-  assert.ok(mine.some((x) => x.endsWith('"The record could not be read, so nothing was shown."')), mine.join('\n'));
-  assert.ok(!r.failures.some((x) => x.startsWith('marker ')) && !mine.some((x) => x.includes(`${F}:5 `)), r.failures.join('\n'));
-  assert.ok(has(r.failures, 'inline', 'clean', F, 6, 'stitched'));
-  assert.ok(!mine.some((x) => x.includes(`${F}:7 `)));
-  assert.ok(has(r.failures, 'inline', 'clean', F, 8, 'stitched'));
-  assert.ok(mine.filter((x) => x.includes(`${F}:9 `)).every((x) => !x.includes('so nothing')), mine.join('\n')); // as today (git stash to compare)
-  assert.equal(mine.filter((x) => x.includes(`${F}:2 `)).length, 1);
+  const mine = at(r.findings, 'inline', 'clean');
+  assert.ok(has(r.findings, 'inline', 'clean', F, 2, ''), show(mine));
+  assert.ok(mine.some((x) => x.raw === 'The record could not be read, so nothing was shown.'), show(mine));
+  assert.ok(!at(r.findings, 'marker').length && !at(mine, 'inline', 'clean', F, 5).length, show(r.findings));
+  assert.ok(has(r.findings, 'inline', 'clean', F, 6, 'stitched'));
+  assert.equal(at(mine, 'inline', 'clean', F, 7).length, 0);
+  assert.ok(has(r.findings, 'inline', 'clean', F, 8, 'stitched'));
+  assert.ok(at(mine, 'inline', 'clean', F, 9).every((x) => !x.raw.includes('so nothing')), show(mine)); // as today (git stash to compare)
+  assert.equal(at(mine, 'inline', 'clean', F, 2).length, 1);
 });
 
 test('foldLiteralChains: quotes and templates join; interpolated, mixed and member operands do not', () => {
@@ -482,16 +488,27 @@ test('testenglish (bio K5426): off without a baseline; with one, English in a ne
   const rec = await checkWords(root, [], { record: true });
   assert.equal(rec.englishNow['test/viol/fresh.test.mjs'], 1);
   assert.equal(rec.englishNow['test/viol/old.test.mjs'], 2);
-  const w = (obj) => writeFileSync(join(root, 'build/tests-english-baseline.json'), JSON.stringify({ files: obj }));
+  // the check reads the commit (R10): each baseline is committed before the run
+  const w = (obj) => { writeFileSync(join(root, 'build/tests-english-baseline.json'), JSON.stringify({ files: obj })); execFileSync('git', ['-C', root, 'add', '-A']); execFileSync('git', ['-C', root, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'baseline']); };
   w({ 'test/viol/old.test.mjs': 2, 'test/viol/a.test.mjs': 99 });
   let r = await checkWords(root);
-  assert.deepEqual(r.failures.filter((x) => x.startsWith('testenglish')).map((x) => x.split(' ')[2].split(':')[0]), ['test/viol/fresh.test.mjs']);
-  assert.match(r.failures.find((x) => x.startsWith('testenglish')), /\[new\]/);
+  assert.deepEqual(at(r.findings, 'testenglish').map((x) => [x.file, x.tag]), [['test/viol/fresh.test.mjs', 'new']]);
+  assert.equal(at(r.findings, 'testenglish')[0].wordKey, 'refusal.NO_ACCESS', 'it names the key the sentence lives under (N2-10)');
   w({ 'test/viol/old.test.mjs': 1, 'test/viol/fresh.test.mjs': 1, 'test/viol/a.test.mjs': 99 });
   r = await checkWords(root);
-  assert.equal(r.failures.filter((x) => x.startsWith('testenglish')).length, 2, 'a file that grew past its baseline lists all its sites');
-  assert.match(r.failures.find((x) => x.startsWith('testenglish')), /grew 1 to 2/);
+  assert.equal(at(r.findings, 'testenglish').length, 2, 'a file that grew past its baseline lists all its sites');
+  assert.equal(at(r.findings, 'testenglish', 'viol', 'test/viol/old.test.mjs')[0].tag, 'grew 1 to 2');
   w({ 'test/viol/old.test.mjs': 5, 'test/viol/fresh.test.mjs': 1, 'test/viol/a.test.mjs': 99 });
   r = await checkWords(root);
-  assert.equal(r.failures.filter((x) => x.startsWith('testenglish')).length, 0, 'under the baseline: no finding');
+  assert.equal(at(r.findings, 'testenglish').length, 0, 'under the baseline: no finding');
+});
+
+// N2-10 (ARC-3; build/requirements/architecture.md R7): a literal user-facing sentence in a test names the key it lives under.
+test('testcopy (N2-10): an exact copy and a part copy name the key of the row that holds the sentence; the same test by key passes', async () => {
+  const T = 'test/clean/key.test.mjs';
+  const byWords = ['import assert from "node:assert/strict";', 'assert.equal(out.says, "Nothing by that name is held here.");', 'assert.match(out.text, "Welcome back, {name}. Your team has");'].join('\n') + '\n';
+  const r = await checkWords(product({ [T]: byWords }), ['clean']);
+  assert.deepEqual(at(r.findings, 'testcopy').map((f) => [f.line, f.tag, f.wordKey]), [[2, null, 'refusal.NOT_FOUND'], [3, 'part', 'screen.home.greeting']]);
+  const byKey = ['import assert from "node:assert/strict";', 'import { word } from "../../src/setup-words/index.mjs";', 'assert.equal(out.says, word("refusal.NOT_FOUND"));', 'assert.equal(out.text, word("screen.home.greeting", { name: "A", count: 3 }));'].join('\n') + '\n';
+  assert.deepEqual((await checkWords(product({ [T]: byKey }), ['clean'])).findings, []);
 });

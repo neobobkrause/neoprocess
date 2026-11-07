@@ -18,7 +18,7 @@
 //     "product": "…", "csv": "…" or ["…"], "plan": "…", "records": { "<module>": "…" } }   // file overrides of git
 import { readFileSync, existsSync } from 'node:fs';
 import { dirname, resolve, join } from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { repo } from '../../tools/record.mjs';   // git only through record's repo (record R1; N2-12)
 import { parseMessageLine, parseRecord, parsePlanStatus, parseCsv, BACKSTOP } from './records.mjs';
 
 const SLACK_MS = 3 * 60e3;
@@ -46,14 +46,18 @@ export function loadRun(runPath, productDir) {
       triggers: (s.list_triggers || []).flatMap(unwrapTriggers),
     };
   }).sort((a, b) => t(a.taken_at) - t(b.taken_at));
-  const git = product ? (args) => execFileSync('git', ['-C', product, ...args], { encoding: 'utf8', maxBuffer: 256 << 20 }) : null;
+  // git runs at the repository's top; the product may sit in a subdirectory of it (`dryrun/`), so its paths are given as
+  // `R.rel(path)` and `--relative` names the product's directory
+  const R = product ? repo(product) : null;
+  const git = R ? (args) => R.raw(args) : null;
+  const relArg = R && R.rel('.') !== '.' ? `--relative=${R.rel('.')}/` : '--relative';
   const ref = (branch) => {
     if (!git) return null;
     for (const r of [`origin/${branch}`, branch]) { try { git(['rev-parse', '--verify', '--quiet', `${r}^{commit}`]); return r; } catch {} }
     return null;
   };
   // Paths are the product's (`build/…`), read relative to the product directory, which may sit inside its repository (`dryrun/`).
-  const show = (r, path) => { try { return r ? git(['show', `${r}:./${path}`]) : null; } catch { return null; } };
+  const show = (r, path) => { try { return r ? git(['show', `${r}:${R.rel(path)}`]) : null; } catch { return null; } };
   const T = run.tranche;
   const file = (p) => (p && existsSync(rel(p)) ? readFileSync(rel(p), 'utf8') : null);
   const tranche = T ? ref(`tranche/${T}`) : null;
@@ -69,7 +73,7 @@ export function loadRun(runPath, productDir) {
     for (const r of [ref(`job/${T}/${module}`), tranche]) {
       if (!r) continue;
       if (at) {
-        const c = git(['log', '-1', `--before=${at}`, '--format=%H', r, '--', path]).trim();
+        const c = git(['log', '-1', `--before=${at}`, '--format=%H', r, '--', R.rel(path)]).trim();
         if (c) return show(c, path);
         continue;
       }
@@ -83,7 +87,7 @@ export function loadRun(runPath, productDir) {
   snaps.forEach((s, i) => { for (const tr of s.triggers) triggers.set(tr.id, { ...tr, seen: [...(triggers.get(tr.id)?.seen || []), i] }); });
   const plan = planText ? parsePlanStatus(planText) : null;
   const currentBob = run.current_bob ?? plan?.bob?.id ?? null;
-  return { run, dir, product, git, ref, tranche, snaps, sessions, moduleOf, record, csv: csvTexts.some(Boolean) ? { rows: csvTexts.filter(Boolean).flatMap((x) => parseCsv(x).rows) } : null, planText, plan, currentBob, triggers: [...triggers.values()] };
+  return { run, dir, product, git, rel: R ? R.rel : (p) => p, relArg, ref, tranche, snaps, sessions, moduleOf, record, csv: csvTexts.some(Boolean) ? { rows: csvTexts.filter(Boolean).flatMap((x) => parseCsv(x).rows) } : null, planText, plan, currentBob, triggers: [...triggers.values()] };
 }
 
 // When a session was archived: an injection that archived it, else the `updated_at` of the first snapshot that shows
@@ -197,8 +201,8 @@ export const PREDICATES = {
         if (!first) bad.push(`no commit on ${S.tranche} carries ${short(p.bob.id)}'s session`);
         else {
           const c = first.split('\t')[0];
-          const files = S.git(['diff-tree', '--relative', '--no-commit-id', '--name-only', '-r', c]).split('\n').filter(Boolean);
-          const diff = S.git(['diff', '-U0', `${c}^`, c, '--', 'build/plan/current.md']).split('\n').filter((l) => /^[+-](?![+-])/.test(l));
+          const files = S.git(['diff-tree', S.relArg, '--no-commit-id', '--name-only', '-r', c]).split('\n').filter(Boolean);
+          const diff = S.git(['diff', '-U0', `${c}^`, c, '--', S.rel('build/plan/current.md')]).split('\n').filter((l) => /^[+-](?![+-])/.test(l));
           if (files.join() !== 'build/plan/current.md' || diff.some((l) => !/^[+-]\*\*Status\*\*/.test(l))) bad.push(`its first commit ${c.slice(0, 10)} changes more than the Status line (${files.join(', ')})`);
         }
       }
@@ -247,7 +251,7 @@ export const PREDICATES = {
       // With git: the replacing QUESTION's heading first pushed on the job branch; an ANSWER re the replaced id after it is stale.
       const jref = S.ref && S.ref(`job/${S.run.tranche}/${mod}`);
       if (jref) for (const r of entries.filter((x) => x.module === mod && x.replaces)) {
-        const first = S.git(['log', '--reverse', '--format=%ct', `-S${r.line}`, jref, '--', `build/jobs/${S.run.tranche}/${mod}.md`]).split('\n')[0];
+        const first = S.git(['log', '--reverse', '--format=%ct', `-S${r.line}`, jref, '--', S.rel(`build/jobs/${S.run.tranche}/${mod}.md`)]).split('\n')[0];
         if (!first) continue;
         for (const x of log.filter((y) => y.src === 'commit' && y.module === mod && y.kinds.includes('ANSWER') && y.re === r.replaces && y.time > Number(first) * 1000)) bad.push(`${mod}: ANSWER ${x.id} re ${r.replaces} committed after ${r.id} replaced it`);
       }
