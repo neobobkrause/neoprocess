@@ -134,6 +134,24 @@ test('R4: commitPush commits only the files named on the branch named and pushes
   assert.deepEqual(unpushed(R), [`1 commit(s) on ${TRANCHE} not pushed`]);
 });
 
+test('R4: commitPush commits the files named and nothing else already staged; the rest stays staged (K15)', () => {
+  const w = world({ plan: false }), R = repo(w.d);
+  put(w.d, 'other.md', 'o\n'); g(w.d, 'add', 'other.md');
+  put(w.d, 'one.md', '1\n');
+  const c = commitPush(R, TRANCHE, ['one.md'], 'one');
+  assert.equal(g(w.origin, 'rev-parse', '--short', TRANCHE), c);
+  assert.equal(g(w.origin, 'show', '--name-only', '--format=', TRANCHE), 'one.md', 'the pushed commit holds one.md only');
+  assert.equal(g(w.d, 'diff', '--cached', '--name-only'), 'other.md', 'the other staged file is still staged, uncommitted');
+  // a named deletion is committed alone too, with other work staged beside it
+  execFileSync('rm', [join(w.d, 'src/a.mjs')]);
+  commitPush(R, TRANCHE, ['src/a.mjs', 'never.md'], 'drop a');
+  assert.equal(g(w.origin, 'show', '--name-status', '--format=', TRANCHE), 'D\tsrc/a.mjs', 'the deletion only; a named path never committed records nothing');
+  assert.equal(g(w.d, 'diff', '--cached', '--name-only'), 'other.md');
+  const tip = g(w.origin, 'rev-parse', TRANCHE);
+  commitPush(R, TRANCHE, ['one.md'], 'nothing');
+  assert.equal(g(w.origin, 'rev-parse', TRANCHE), tip, 'a named file unchanged makes no commit, though other work is staged');
+});
+
 test('R4: a push to any branch but the role\'s own, as its role record names it, is refused before anything is written', () => {
   const w = world({ plan: false }), R = repo(w.d);
   writeFileSync(join(w.d, '.git', REC.ROLE_FILE), JSON.stringify({ role: 'job', module: 'alpha', session: S('A') }));
@@ -263,6 +281,9 @@ test('R7: status prints the context share from get_session\'s output and REFRESH
   assert.equal(contextShare(gs(560000), 'root').refresh, true);
   assert.equal(contextShare(gs(540000), 'root').refresh, false);
   assert.equal(contextShare(gs(510000), 'lane').refresh, true);
+  // the process's own architecture session refreshes at 40 %, as BOB does (SES 5, MNT-9; K15)
+  assert.match(contextShare(gs(450000), 'process').line, /^context: 45 % of 1000000 \(threshold 40 %\) REFRESH$/);
+  assert.equal(contextShare(gs(390000), 'process').refresh, false);
   assert.match(contextShare(JSON.stringify(gs(510000)), 'job').line, /^context: 51 % of 1000000 \(threshold 50 %\) REFRESH$/);
   assert.match(contextShare({}, 'job').line, /unknown/);
   const s = status({ product: world().d, role: 'job', session: gs(600000) });
@@ -466,6 +487,14 @@ test('R4: an unreadable role record names no known role: refused, never a crash;
   writeFileSync(join(w.d, '.git', REC.ROLE_FILE), '[1]');
   assert.throws(() => commitPush(R, TRANCHE, ['build/epochs.md'], 'x'), Refused);
   assert.equal(status({ product: w.d }).epoch, 'E1');
+});
+
+test('R11: a row is measured only with all four counts whole numbers; an estimate, a fraction or a missing count is refused (K15)', () => {
+  const row = (c) => ['session_01A', 'job', 'A #1', 'a', ...c, '', '', '', ''];
+  for (const bad of [['~5000', '', '', ''], ['~5000', 1, 2, 3], [1.5, 2, 3, 4], [-1, 2, 3, 4], ['1e3', 2, 3, 4], [1, 2, 3, ''], ['5k', 2, 3, 4], [Infinity, 2, 3, 4], [' 5', 2, 3, 4]]) {
+    assert.throws(() => metricsText(null, row(bad)), (e) => e instanceof Refused && /all four counts as whole numbers/.test(e.message), JSON.stringify(bad));
+  }
+  assert.equal(metricsText(null, row(['5000', 0, '12', 7])), `${METRICS_HEAD}session_01A,job,A #1,a,5000,0,12,7,,,,\n`, 'whole numbers, as numbers or digits');
 });
 
 test('R11: a metrics row is keyed by a session id and has the head\'s twelve fields', () => {

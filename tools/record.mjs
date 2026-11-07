@@ -90,7 +90,10 @@ export function commitPush(R, branch, paths, message) {
   const del = paths.filter(gone), keep = paths.filter((p) => !del.includes(p));
   if (del.length) R.g(['rm', '-q', '--cached', '--ignore-unmatch', '--', ...del.map(R.rel)]);
   if (keep.length) R.g(['add', '--', ...keep.map(R.rel)]);
-  try { R.g(['diff', '--cached', '--quiet']); } catch { R.g(['commit', '-q', '-m', message]); }
+  // the named files only (a pathspec: `git commit --only`): anything else already staged stays staged, never committed
+  const inHead = (p) => { try { R.g(['cat-file', '-e', `HEAD:${R.rel(p)}`]); return true; } catch { return false; } };
+  const named = [...keep, ...del.filter(inHead)].map(R.rel);   // a path gone and never committed has nothing to record
+  if (named.length) { try { R.g(['diff', '--cached', '--quiet', 'HEAD', '--', ...named]); } catch { R.g(['commit', '-q', '-m', message, '--only', '--', ...named]); } }
   try { R.g(['push', '-q', 'origin', `HEAD:refs/heads/${branch}`]); }
   catch {
     // a lost race: the remote merged in once; a merge that conflicts is aborted, the checkout left as it was, and refused
@@ -319,6 +322,10 @@ export function metricsText(csv, row) {
   const none = counts.every((c) => c === '' || c === null || c === undefined), named = /^unmeasured: \S/.test(note);
   if (none && !named) refuse(`${row[0]}: a row without counts is named unmeasured, with the reason (unmeasuredRow)`);
   if (!none && named) refuse(`${row[0]}: an unmeasured row carries no counts: a count is measured or left empty, never estimated`);
+  // a measured row: all four counts whole numbers, as read from the session's archive; anything else (an estimate, a
+  // fraction, a count missing beside the others) is refused
+  const whole = (c) => (typeof c === 'number' ? Number.isSafeInteger(c) && c >= 0 : /^\d+$/.test(String(c ?? '')));
+  if (!none && !counts.every(whole)) refuse(`${row[0]}: a measured row has all four counts as whole numbers, not ${counts.map((c) => JSON.stringify(c ?? null)).join(', ')}: a count is measured or the row is named unmeasured, never estimated`);
   const width = METRICS_HEAD.trim().split(',').length;
   if (!/^session_[0-9A-Za-z]+$/.test(String(row[0] ?? ''))) refuse(`a metrics row is keyed by a session id, not ${JSON.stringify(row[0] ?? null)}`);
   if (row.length !== width) refuse(`${row[0]}: a metrics row has ${width} fields, not ${row.length}`);
@@ -343,8 +350,9 @@ export const unmeasuredRow = (session, role, name, module, why) => [session, rol
 
 // ---- status (R6, R7, R13; REC-3, REC-7): the whole record a role needs, from git, in one call ----
 
-// SESSIONS SES 5: BOB refreshes past 40 % of its window, a job or lane past half, ROOT past 55 %.
-export const THRESHOLDS = { bob: 40, job: 50, lane: 50, process: 50, onboard: 50, root: 55 };
+// SESSIONS SES 5: BOB refreshes past 40 % of its window, a job or lane past half, ROOT past 55 %; the process's own
+// architecture session (the neoProcess lane, `process`) is an architecture session (MNT-9) and refreshes at BOB's 40 %.
+export const THRESHOLDS = { bob: 40, job: 50, lane: 50, process: 40, onboard: 50, root: 55 };
 // The context share from what `get_session` returned (measured 30 Oct: ccr.external_metadata.context_usage
 // { max_tokens, used_tokens }). The session's platform status is never read here (PLT-11).
 export function contextShare(session, role) {
