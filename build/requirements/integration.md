@@ -33,7 +33,9 @@ Work counts only when merged and proven: the review decision and its worker, the
 - `record`: `stateRead`, `stateWrite`, `commitPush`, `metricsRow`, `addr`.
 - `planning`: `place`, `report`, the stop record.
 - `jobs`: `jobReopen`, `jobRetire`, the job lines.
-- `gate`: `runGate`'s result, `gateNeutral`.
+- `architecture`: `modules` (a layer's modules, a module's users), `run` and `readResult` (the whole-product checks at a layer's close).
+- `requirements`: `MEASUREMENT_RULE` (the sentence the review brief carries).
+- `gate`: `runGate`'s result, `gateNeutral` (gate's, its R5; merge imports it).
 
 ### Invariants
 
@@ -46,4 +48,4 @@ Work counts only when merged and proven: the review decision and its worker, the
 
 ### Suggestions
 
-- `tools/integration.mjs`, extracted from `tools/proc.mjs` (review decide/result, merge, `gateNeutral`, merged, layer close, tranche close, the release commands); the plan's entries N2-27 to N2-29.
+- `tools/integration.mjs`, extracted from `tools/proc.mjs` (review decide/result, merge, merged, layer close, tranche close, the release commands); the plan's entries N2-27 to N2-29.
