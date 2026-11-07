@@ -59,11 +59,13 @@ import { fileURLToPath } from 'node:url';
 import { TRANCHE, jobBranch, stateBranch, ROLE_FILE, refuse, repo, ghRepo, readRole, unpushed, commitPush, pruneRef, epoch, needEpoch, stateRead, stateList, stateWrite, epochOpen, epochClose, parsePlan, planEdit as recordPlanEdit, metricsRow, unmeasuredRow, actDone, USAGE_FIELDS, status as recordStatus, statusLines, METRICS_HEAD, jobFiles, addr as recordAddr, stopOf } from './record.mjs';
 export { TRANCHE, jobBranch, stateBranch, ROLE_FILE, refuse, repo, ghRepo, readRole, unpushed, commitPush, pruneRef, epoch, stateRead, stateList, stateWrite, epochOpen, epochClose, parsePlan, metricsRow, jobFiles } from './record.mjs';
 // The gate and the plan's entries come from tools/lib.mjs, moved there from the old tool at the commit point (P3).
-import { entriesOf, runTests, moduleChecks, withArtifacts, evidenceItems, history, modules, artifacts, allChecks, reds, EVIDENCE_FORMS, EVIDENCE_ITEM, stepsCmd, stepsReason, plainReason, BOB_READS, SAID_FILE, saidKey, transcriptOf, freshReaderReason, evidenceReason } from './lib.mjs';
+import { entriesOf, evidenceItems, history, modules, artifacts, allChecks, reds, EVIDENCE_FORMS, EVIDENCE_ITEM, stepsCmd, stepsReason, plainReason, BOB_READS, SAID_FILE, saidKey, transcriptOf, freshReaderReason, evidenceReason } from './lib.mjs';
 // The platform module (layer 1): its refusal class, the version check, the runner workflows' dispatch, the grants.
+import { runGate, gateCheck, gateNeutral } from './gate.mjs';
+export { gateNeutral };
 import { Refused, processHead, versionCommand, ownerSecret, dispatch, grantsCheck as checkGrants, grantsHeld, knownIds, isKnown, WORKFLOWS } from './platform.mjs';
 // The requirements module (layer 2): the requirements file's parser, service blocks, the mark strike, the measurement line, a job's reading set.
-import { serviceBlocks, readingSet, strike, usesOf, budgetOf, overrun, MEASUREMENT_RULE } from './requirements.mjs';
+import { readingSet, strike, budgetOf, overrun, MEASUREMENT_RULE } from './requirements.mjs';
 export { versionCommand as versionCheck, GRANTS_FILE, GRANTS_PRODUCT, GRANTS_FRESH_H, EXPIRY_WARN_D } from './platform.mjs';
 // The integration module (layer 3, N2-27 to N2-29): the review, the merge and its record, the layer's close, the close
 // pull request's merge, retirement, a BOB's release and a defect.
@@ -1214,25 +1216,6 @@ export function jobPosted(o) {
   const after = owed.find((x) => /^ready after /.test(x));
   return { commit, owed, send: owedByJob({ owed }).length ? null : { session_id: addr({ product: o.product, bob: true }), message: `COMPLETE #${j.runs}: ${m} (PR #${j.pr}); the report is its comment${after ? `; ${after} merges (BOB marks it ready then)` : ' and it is ready for review'}.` } };
 }
-// The concerns the tool lists mechanically (JOB-LIFE §5); BOB judges and writes the decision.
-// Issue 86 (Civicsmith's BOB #338): BOB prepares later stages on the tranche while a layer runs (P18, P19), so a green tip
-// is behind the tranche again by the time its 13-minute gate ends, and an update for every one of BOB's commits keeps a
-// COMPLETE job from merging. A green result still holds for the merged result when every file the tranche changed since
-// the tip's base is a record of BOB's that the gate does not read for this module: under `build/`, and not the module
-// map, the layers, the manifest (artifacts, commands), the words tables, the requirements of the module, of a module it
-// uses or of one that uses it, its task summary, a generated artifact, or any module's code or tests. The gate compares
-// every check with the base, so a finding of BOB's own is inherited either way; the rest of the gate reads none of these.
-// `held` names each file that does need the gate again, with why; the layer's close runs every check over the whole product.
-export function gateNeutral(R, m, head) {
-  const x = mod(R, m), mods = modules(R), base = R.g(['merge-base', head, `origin/${TRANCHE}`]);
-  const near = [m, ...(x.uses || []).filter((u) => !u.startsWith('*')), ...mods.filter((y) => (y.uses || []).includes(m)).map((y) => y.id)];
-  const read = new Set(['build/modules.json', 'build/layers.md', 'build/manifest.md', 'build/words.json', 'build/ops.json', 'build/requirements/README.md', ...near.map((k) => `build/requirements/${k}.md`)]);
-  const code = mods.flatMap((y) => [...(y.paths || []), ...(y.tests || [])]), gen = artifacts(R).flatMap((a) => a.paths);
-  const under = (f, p) => f === p || f.startsWith(p.endsWith('/') ? p : `${p}/`);
-  const why = (f) => (code.some((p) => under(f, p)) ? "a module's code or tests" : gen.includes(f) ? 'a generated artifact' : read.has(f) ? `read by the gate for ${m}` : f.split('/')[1] === 'summaries' && f.endsWith(`/${m}.md`) ? `${m}'s task summary` : !f.startsWith('build/') ? 'outside build/' : null);
-  const files = R.g(['diff', '--name-only', base, `origin/${TRANCHE}`]).split('\n').filter(Boolean).map((f) => relative(R.rel('.'), f));
-  return { files, held: files.map((f) => ({ file: f, why: why(f) })).filter((h) => h.why) };
-}
 // JOB-LIFE §7: a CHANGE after the merge re-opens the job in its session: the branch remade at the tranche tip (the
 // merged one deleted, never force-pushed), a new draft PR whose body is the CHANGE, and the job goes round again.
 export function jobReopen(o) {
@@ -1328,100 +1311,11 @@ function regenerate(R) {
   const changed = list.flatMap((a) => a.paths.filter((p) => { try { R.g(['diff', '--quiet', '--', R.rel(p)]); return false; } catch { return true; } }));
   return { changed, stale };
 }
-// JOB-LIFE §4: the gate, one function run by the job locally (`job complete`) and by CI on the pull request and on the
-// merged result (`gate`): ownership against the base; the artifacts regenerated for the run (never committed by a job:
-// the queue has no regeneration step and two jobs of a layer would conflict on one; `layer close` commits them) and each
-// verified; the module's tests and the tests of every module that uses it, a red the base already had inherited; the
-// checks scoped to the module, a finding the base already had not this job's; the size limits (SESSIONS §6). Nothing is
-// written, and the checkout is left as it was.
-export function runGate(R, m, base) {
-  const fails = [];
-  mod(R, m);
-  if (R.g(['status', '--porcelain', '--untracked-files=no'])) refuse('the checkout has uncommitted changes: the gate measures commits');
-  const own = spawnSync('node', [join(PROCESS, 'checks/ownership.mjs'), R.dir, m, base, 'HEAD'], { encoding: 'utf8' });
-  if (own.status) { const lines = `${own.stdout}${own.stderr}`.trim().split('\n'), found = lines.filter((l) => l.startsWith('FAIL')).map((l) => `ownership: ${l.replace(/^FAIL\s+/, '')}`); fails.push(...(found.length ? found : [`ownership: ${lines.pop()}`])); }
-  const users = usersOfChange(R, m, base).users;   // issue 93: P11, the users of the change only
-  const measure = (mods, checks) => withArtifacts(R, () => {
-    const stale = artifacts(R).filter((a) => spawnSync('sh', ['-c', a.verify], { cwd: R.dir, encoding: 'utf8' }).status !== 0).map((a) => a.path);
-    return { stale, t: Object.fromEntries(mods.map((k) => [k, runTests(R, k)])), ck: checks ? moduleChecks(R, m) : { names: [], fails: new Set() } };
-  });
-  const now = measure([m, ...users], true);
-  if (now.stale.length) fails.push(`artifacts: regenerated but not verified: ${now.stale.join(', ')}`);
-  const red = Object.keys(now.t).filter((k) => reds(now.t[k]).length);
-  const before = red.length || now.ck.fails.size ? at(R, base, () => measure(red, now.ck.fails.size > 0)) : { t: {}, ck: { fails: new Set() } };
-  for (const [k, tests] of Object.entries(now.t)) {
-    if (!tests.tests && !tests.noResult.length) { if (k === m) fails.push('tests: none ran'); continue; }
-    const nr = reds(tests).filter((n) => !reds(before.t[k] || {}).includes(n));
-    if (nr.length || (tests.fail && !reds(tests).length)) fails.push(`${k === m ? 'tests' : `${k} (uses ${m})`}: ${tests.pass}/${tests.tests} pass; new reds: ${nr.join('; ') || 'unnamed'} (report: ${tests.report})`);
-  }
-  fails.push(...[...now.ck.fails].filter((y) => !before.ck.fails.has(y)));
-  fails.push(...sizes(R, [m]).map((s) => `size: ${s}`));
-  const { [m]: tests, ...rest } = now.t;
-  return { fails, tests, users: rest, checks: now.ck.names };
-}
-// Issue 93 (Civicsmith's BOB #339; P11: "When it changes what its module provides, it also runs the tests of every module
-// that uses the change"): events has 31 users, and every job of events ran all 31 suites. A user relies on what the module
-// provides as its requirements state it, and the module's own tests prove it fully compliant (P7), so what it provides
-// changes only with the Public part of its requirements (the `not yet met` marks aside) or its export lines. The services
-// changed: each Provides block whose text differs, and each name an export line adds or drops; the Purpose, any other Public
-// text, `export default` or an export line naming nothing changes them all. The users run: every module whose `uses`
-// lists m and whose own Uses line names a changed service, or names none of m's (it may use any). A service that is only
-// added (a new export name, a new Provides block) has no user yet, so it changes none (issue 113, BOB #341: one added
-// constant ran fourteen suites).
-export function usersOfChange(R, m, base) {
-  const x = mod(R, m), rq = `build/requirements/${m}.md`, unmark = (t) => (t || '').replace(/\s*\*\(not yet met:[^)]*\)\*/g, '');
-  const pub = (ref) => { try { return unmark(R.g(['show', `${ref}:${R.rel(rq)}`]).split(/^## Private/m)[0]); } catch { return ''; } };
-  const before = pub(base), after = pub('HEAD'), changed = new Set();
-  let all = false;
-  if (before !== after) {
-    const a = serviceBlocks(before), b = serviceBlocks(after), key = (bl) => bl.names.join(',');
-    const rest = (t, sb) => sb.blocks.reduce((u, bl) => u.replace(bl.text.trimEnd(), ''), t).replace(/\s+/g, ' ');
-    if (a.purpose !== b.purpose || rest(before, a) !== rest(after, b)) all = true;
-    const ta = new Map(a.blocks.map((bl) => [key(bl), bl])), tb = new Map(b.blocks.map((bl) => [key(bl), bl]));
-    for (const k of ta.keys()) if (ta.get(k).text.trimEnd() !== (tb.get(k)?.text ?? '').trimEnd()) for (const n of ta.get(k).names) changed.add(n);   // a block that is new has no user yet (issue 113)
-  }
-  const exp = (x.paths || []).length ? R.g(['diff', base, 'HEAD', '--', ...(x.paths || []).map(R.rel)]).split('\n').filter((l) => /^[+-]\s*export\b/.test(l)) : [];
-  for (const l of exp) {   // issue 113: a name only added is used by nobody yet; a dropped or redefined one (its old line gone) is; a line naming nothing stays every user's
-    const names = [...l.matchAll(/\bexport\s+(?:async\s+)?(?:function\*?|const|let|var|class)\s+([A-Za-z_$][\w$]*)/g), ...[...(l.match(/\bexport\s*\{([^}]*)\}/)?.[1] ?? '').matchAll(/(?:^|,)\s*(?:[A-Za-z_$][\w$]*\s+as\s+)?([A-Za-z_$][\w$]*)/g)]].map((y) => y[1]);
-    if (!names.length || /\bexport\s+default\b/.test(l)) all = true; else if (l.startsWith('-')) names.forEach((n) => changed.add(n));
-  }
-  const users = modules(R).filter((y) => (y.uses || []).includes(m) && (y.tests || []).length).filter((y) => {
-    if (all) return true;
-    if (!changed.size) return false;
-    const named = usesOf(R.read(`build/requirements/${y.id}.md`) || '').get(m) || [];
-    return !named.length || named.some((n) => changed.has(n));
-  }).map((y) => y.id);
-  return { all, changed: [...changed], users };
-}
-// The module a diff belongs to: exactly one module's paths, tests or requirements file (one job, one module; P8).
-export function moduleOfDiff(R, base) {
-  const gen = artifacts(R).flatMap((a) => a.paths);
-  const files = R.g(['diff', '--name-only', `${base}...HEAD`]).split('\n').filter(Boolean).map((f) => relative(R.rel('.'), f)).filter((f) => !gen.includes(f));
-  const owner = (f) => modules(R).find((x) => [...(x.paths || []), ...(x.tests || [])].some((p) => f === p || f.startsWith(p.endsWith('/') ? p : `${p}/`)) || f === `build/requirements/${x.id}.md`)?.id;
-  const touched = [...new Set(files.map(owner).filter(Boolean))];
-  if (!files.length) return null;   // the job's opening commit: nothing to check yet
-  if (!touched.length) refuse(`no module's files changed since ${base.slice(0, 7)}: ${files.join(', ')}`);
-  // K2 (BOB #2, 30 Oct; rulebook REQ 9): an extraction's diff also touches the legacy module(s) its module names in `from`
-  // (the moved code removed, its callers rewired); a touched module named in another touched module's `from` is that
-  // module's source, not a second module. Measured on N2 layer 1: both jobs' gates refused "platform, proc-legacy".
-  const all = modules(R), from = (id) => [].concat(all.find((x) => x.id === id)?.from || []);
-  const ids = touched.filter((id) => !touched.some((o) => o !== id && from(o).includes(id)));
-  if (ids.length > 1) refuse(`the diff touches several modules: ${ids.join(', ')} (one job, one module; P8)`);
-  return ids[0];
-}
-// CI's step (and a hand check): the gate on this checkout against the base, the module read from the diff when not named;
-// the shims checked for drift. Fails (exit 1) naming everything that failed.
+// CI's step (and a hand check): the gate module's hand form, with the shims checked for drift.
 export function gateCmd(o) {
-  const R = repo(o.product);
-  let base;
-  if (o.base) { try { base = R.g(['rev-parse', '--verify', `${o.base}^{commit}`]); } catch { refuse(`--base ${o.base}: not a commit this checkout sees`); } }
-  else { R.fetch(TRANCHE); base = history(R, `origin/${TRANCHE}`, 'HEAD') ?? refuse(`no common history with ${TRANCHE}: --base <ref>`); }
-  const m = o.module || moduleOfDiff(R, base);
-  const drift = shims({ ...o, check: true }).drift.map((d) => `shims: ${d}`);
-  if (!m) return { ok: !drift.length, module: null, base: base.slice(0, 7), fails: drift, note: 'nothing changed since the base: the job\'s opening commit', tests: { pass: 0, tests: 0 }, users: {}, checks: [] };
-  const r = runGate(R, m, base);
-  const fails = [...r.fails, ...drift];
-  return { ok: !fails.length, module: m, base: base.slice(0, 7), fails, tests: { pass: r.tests.pass, tests: r.tests.tests }, users: Object.fromEntries(Object.entries(r.users).map(([k, v]) => [k, `${v.pass}/${v.tests}`])), checks: r.checks };
+  const r = gateCheck(o);
+  const fails = [...r.fails, ...shims({ ...o, check: true }).drift.map((d) => `shims: ${d}`)];
+  return { ...r, ok: !fails.length, fails };
 }
 // PRODUCT-SUPPLIES: the few files that sit in the product repository, written from here and never by hand; `--check`
 // lists the ones that differ (the gate fails on drift). `--process` is the process checkout's path in a session and

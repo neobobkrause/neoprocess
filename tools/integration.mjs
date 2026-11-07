@@ -4,18 +4,20 @@
 // record lines and rows (R5). Nothing here archives, re-arms, deletes or interrupts a session, or prints one as owed
 // (R6); every act it prints is the architecture session's, never Bob's (R7).
 //
-// K24: integration imports planning, jobs and gate once each has merged, and merges after them. Until then the few
-// record-level helpers it needs from them sit in the block marked BORROWED below, written to their requirements files;
-// each is replaced by the provider's import as it merges, in this job, so no later job rewires anything.
+// K24: integration imports planning, jobs and gate once each has merged, and merges after them (gate merged: imported).
+// Until planning and jobs merge, the few record-level helpers it needs from them sit in the block marked BORROWED below,
+// written to their requirements files; each is replaced by the provider's import as it merges, in this job.
 import { spawnSync } from 'node:child_process';
 import { readFileSync, existsSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { join } from 'node:path';
 import { TRANCHE, jobBranch, stateBranch, refuse, repo, ghRepo, readRole, unpushed, commitPush, pruneRef, needEpoch, stateRead, stateWrite, parsePlan, planEdit, jobFiles, METRICS_HEAD, metricsFile } from './record.mjs';
 import { constraints } from './platform.mjs';
 // architecture (K25): the module map, the manifest's artifact rows, and the checks' one machine-readable result.
 import { modules as moduleMap } from '../checks/architecture.mjs';
 import { artifactRows } from '../checks/lib.mjs';
 import { readResult } from '../checks/run.mjs';
+// gate (K25): a green tip behind the tranche only by records the gate does not read for the module (gate R5).
+import { gateNeutral } from './gate.mjs';
 // requirements (K25): the rule every review brief carries (requirements R4; REQ-3).
 import { MEASUREMENT_RULE } from './requirements.mjs';
 export { MEASUREMENT_RULE };
@@ -89,17 +91,6 @@ function evidenceItems(report) {
   if (first) items.push(first);
   for (const l of lines.slice(i + 1)) { if (/^(\*\*|#)/.test(l)) break; const t = l.replace(/^\s*(?:[-*]|\d+[.)])\s+/, '').trim(); if (t) items.push(t); }
   return items;
-}
-// gate (Q5, asked: gate R5's gateNeutral): a green tip behind the tranche only by records the gate does not read for m.
-export function gateNeutral(R, m, head) {
-  const x = mod(R, m), mods = modules(R), base = R.g(['merge-base', head, `origin/${TRANCHE}`]);
-  const near = [m, ...(x.uses || []).filter((u) => !u.startsWith('*')), ...mods.filter((y) => (y.uses || []).includes(m)).map((y) => y.id)];
-  const read = new Set(['build/modules.json', 'build/layers.md', 'build/manifest.md', 'build/words.json', 'build/ops.json', 'build/requirements/README.md', ...near.map((k) => `build/requirements/${k}.md`)]);
-  const code = mods.flatMap((y) => [...(y.paths || []), ...(y.tests || [])]), gen = artifacts(R).flatMap((a) => a.paths);
-  const under = (f, p) => f === p || f.startsWith(p.endsWith('/') ? p : `${p}/`);
-  const why = (f) => (code.some((p) => under(f, p)) ? "a module's code or tests" : gen.includes(f) ? 'a generated artifact' : read.has(f) ? `read by the gate for ${m}` : f.split('/')[1] === 'summaries' && f.endsWith(`/${m}.md`) ? `${m}'s task summary` : !f.startsWith('build/') ? 'outside build/' : null);
-  const files = R.g(['diff', '--name-only', base, `origin/${TRANCHE}`]).split('\n').filter(Boolean).map((f) => relative(R.rel('.'), f));
-  return { files, held: files.map((f) => ({ file: f, why: why(f) })).filter((h) => h.why) };
 }
 // ---- end of BORROWED ----
 
