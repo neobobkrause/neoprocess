@@ -1,6 +1,6 @@
 # record (transient)
 
-**Status** · RECORD #2 · session_012hdw2QxUDNXwUB3U6vpCyo · MERGED · PR #128
+**Status** · RECORD #2 · session_012hdw2QxUDNXwUB3U6vpCyo · ARCHIVED · PR #128
 **Runs** · 5
 **Owed** · none
 **Model** · opus
