@@ -84,8 +84,12 @@
     {
       "id": "planning",
       "layer": 3,
-      "paths": [],
-      "tests": [],
+      "paths": [
+        "tools/planning.mjs"
+      ],
+      "tests": [
+        "tools/test/planning.test.mjs"
+      ],
       "uses": [
         "record",
         "requirements"
@@ -98,9 +102,12 @@
       "id": "jobs",
       "layer": 3,
       "paths": [
-        "JOB-LIFE.md"
+        "JOB-LIFE.md",
+        "tools/jobs.mjs"
       ],
-      "tests": [],
+      "tests": [
+        "tools/test/jobs.test.mjs"
+      ],
       "uses": [
         "platform",
         "record",
@@ -114,8 +121,13 @@
     {
       "id": "gate",
       "layer": 3,
-      "paths": [],
-      "tests": [],
+      "paths": [
+        "tools/gate.mjs",
+        "tools/gate.yml.tmpl"
+      ],
+      "tests": [
+        "tools/test/gate.test.mjs"
+      ],
       "uses": [
         "platform",
         "record",
@@ -128,8 +140,12 @@
     {
       "id": "integration",
       "layer": 3,
-      "paths": [],
-      "tests": [],
+      "paths": [
+        "tools/integration.mjs"
+      ],
+      "tests": [
+        "tools/test/integration.test.mjs"
+      ],
       "uses": [
         "platform",
         "record",
