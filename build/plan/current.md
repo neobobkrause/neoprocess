@@ -104,8 +104,6 @@ proc-legacy (no job: retired by the jobs above)
 
 **record**
 - N2-47 · REC-7's fixture (K3): N2-8's halted-build fixture rebuilt from a frozen copy of Civicsmith's real state branch and handoff of 30 Oct, once a session on this account can read that repository (the record job built it from the measured description, its report of 30 Oct).
-
-**record**
 - N2-48 · REC-3, ARC-5 (architecture's report J2, K22): `status` lists the checks' findings from their one result file (`checks/result.json`, or the manifest row's path), read as JSON by record itself, since record is earlier than architecture and cannot import it.
 
 ## Deferred, with the hard reason (PLN 2)
