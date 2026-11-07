@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as N from '../proc.mjs';
+import * as J from '../jobs.mjs';
 import { preReason, stopReason, partialReadReason, allowReason, askingBobReason, contextUsed, contextReason, issueReason, laneStopReason, readerReason, postRecord, displayReason, READER_FILE } from '../hooks.mjs';
 import { readLocal, recordLocal, METRICS_HEAD, metricsText, status as recordStatus, statusLines } from '../record.mjs';
 import * as N_HOOKS from '../hooks.mjs';
@@ -141,7 +142,7 @@ test('the hooks: no role until recorded; BOB, a job and a lane each refused what
   assert.equal(stopReason('job', ctxOf(alpha.root)), null);   // a wait recorded, everything pushed: the turn ends
   assert.equal(pre(alpha.root, tool(`${REMOTE}send_message`, { session_id: B1, message: 'x' })), null);
   // complete: the two owed acts pass exactly as printed, nothing else; the turn cannot end while they are owed
-  const jc = N.jobComplete({ product: alpha.dir, module: 'alpha', reportFile: f(w.base, 'r.md', '**Met** · none\n**Evidence**\n- alpha/src/index.mjs:1\n') });
+  const jc = J.jobComplete({ product: alpha.dir, module: 'alpha', reportFile: f(w.base, 'r.md', '**Met** · none\n**Elsewhere** · none\n**Evidence**\n- alpha/src/index.mjs:1\n'), reviewFile: f(w.base, 'v.md', 'VERDICT · approve\nDONE review-alpha · approve\n') });
   assert.match(stopReason('job', ctxOf(alpha.root)), /alpha owes: comment; alpha owes: ready/);
   assert.equal(pre(alpha.root, tool(`${GH}add_issue_comment`, { owner: 'o', repo: 'r', issue_number: 11, body: jc.acts[0].body })), null);
   assert.match(pre(alpha.root, tool(`${GH}add_issue_comment`, { owner: 'o', repo: 'r', issue_number: 12, body: 'x' })), /its own PR \(#11\)/);
