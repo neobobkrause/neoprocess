@@ -405,6 +405,22 @@ test('R6: a map entry naming no file is pending beside its module\'s live job li
   assert.deepEqual(checkFormat(r.root).findings, []);
 });
 
+test('R6: every requirements file parses by requirements.parse with no finding; a Test line requirements.isMeasurement names fails (REQ-3)', () => {
+  const found = (files) => pick(checkFormat(repo(base(files)).root), 'key', 'module', 'line');
+  assert.deepEqual(found({}), []);
+  // a statement with no id, an id given twice, a section missing: the parser's findings, keyed
+  assert.deepEqual(found({ 'build/requirements/a.md': REQ('- **R1** one\n- a statement with no id\n- **R2** two') }), [['req-statement', 'a', null]]);
+  assert.deepEqual(found({ 'build/requirements/a.md': REQ('- **R1** one\n- **R2** two\n- **R2** again') }), [['req-ids-twice', 'a', 12]]);
+  assert.deepEqual(found({ 'build/requirements/a.md': REQ('- **R1** one\n- **R2** two').replace('### Satisfies\n', '') }), [['req-section', 'a', null]]);
+  // a Test line naming a fixture above the product's size (default 100,000 rows) is a measurement, not a test
+  const big = REQ('- **R1** one. Test: a 1,000,000-row fixture answers in time.\n- **R2** two. Test: a 500-row fixture.');
+  assert.deepEqual(found({ 'build/requirements/a.md': big }), [['test-measurement', 'a', 11]]);
+  // the product's manifest sets a larger size, and the same line is a test again
+  assert.deepEqual(found({ 'build/requirements/a.md': big, 'build/manifest.md': '| fixture limit | 2,000,000 rows |\n' }), []);
+  // a figure on a deployed copy is a measurement whatever its size
+  assert.deepEqual(found({ 'build/requirements/a.md': REQ('- **R1** one. Test: 3 s on the deployed copy.\n- **R2** two') }), [['test-measurement', 'a', 11]]);
+});
+
 test('format: a clean build state passes', () => {
   const { root } = repo(base());
   assert.deepEqual(checkFormat(root).findings, []);

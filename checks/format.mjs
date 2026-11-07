@@ -21,9 +21,10 @@
 // The module order (layers, `uses`, `from`) is the architecture check's (R1, checks/architecture.mjs `modules`).
 // Usage: node checks/format.mjs <product-root>
 import { pathToFileURL } from 'node:url';
-import { snapshot, requirementIds, requirementFiles, finder, report } from './lib.mjs';
+import { snapshot, requirementFiles, finder, report } from './lib.mjs';
+// R6: requirement files are read by the one parser (requirements R1) and Test lines judged by its measurement line (R4).
+import { parse, isMeasurement } from '../tools/requirements.mjs';
 
-const SECTIONS = ['## Public', '### Purpose', '### Provides', '## Private', '### Uses', '### Invariants', '### Satisfies'];
 
 // N440 (P3): an unresolved merge leaves conflict markers; a build-state file holding one is refused.
 function conflictMarkers(S, add) {
@@ -317,7 +318,9 @@ export function checkFormat(root, { approvalsLastExempt = APPROVALS_LAST_EXEMPT,
     for (const n of layers) add('layer-no-row', { file: 'build/layers.md', layer: n }, `build/layers.md: layer ${n} has no row`);
   } else add('layers-missing', { file: 'build/layers.md' }, 'build/layers.md: missing');
 
-  // Requirements files: one per module, the sections of rulebook REQ 3, each id once.
+  // Requirements files: one per module, each parsing by requirements.parse with no finding (its sections in order, every
+  // statement under an id, each id once), and no Test line that requirements.isMeasurement names (R6; REQ-3).
+  const manifest = S.read('build/manifest.md') || '';
   let reqFiles = 0;
   for (const id of requirementFiles(S)) {
     reqFiles++;
@@ -326,14 +329,16 @@ export function checkFormat(root, { approvalsLastExempt = APPROVALS_LAST_EXEMPT,
     if (!seen.has(id)) add('req-no-module', where, `${at}: names no module of build/modules.json`);
     const text = S.read(at) || '';
     const lines = text.split('\n');
-    let from = 0;
-    for (const sec of SECTIONS) {
-      const i = lines.findIndex((l, k) => k >= from && l.trim() === sec);
-      if (i < 0) add('req-section', { ...where, section: sec }, `${at}: section "${sec}" missing or out of order`); else from = i + 1;
+    for (const p of parse(text).findings) {
+      const sec = p.match(/^section "([^"]+)"/), dup = p.match(/^ids given twice: (.*)$/);
+      if (sec) add('req-section', { ...where, section: sec[1] }, `${at}: section "${sec[1]}" missing or out of order`);
+      else if (dup) { const ids = dup[1].split(' '); add('req-ids-twice', { ...where, line: lines.findIndex((l) => l.includes(`**${ids[0]}**`)) + 1 || null, ids }, `${at}: ids given twice: ${ids.join(' ')}`); }
+      else add('req-statement', where, `${at}: ${p}`);
     }
-    const { all } = requirementIds(text);
-    const dup = all.filter((r, i) => all.indexOf(r) !== i);
-    if (dup.length) add('req-ids-twice', { ...where, line: lines.findIndex((l) => l.includes(`**${dup[0]}**`)) + 1 || null, ids: [...new Set(dup)] }, `${at}: ids given twice: ${[...new Set(dup)].join(' ')}`);
+    lines.forEach((l, i) => {
+      const t = l.match(/\bTest:\s*(.*)$/);
+      if (t && isMeasurement(t[1], manifest)) add('test-measurement', { ...where, line: i + 1 }, `${at}:${i + 1}: a Test line names a measurement (a fixture above the product's size, or a figure on a deployed copy): it belongs in the plan under its own id`);
+    });
   }
 
   // The plan: an entry id once per module. An entry shared by two modules (a provided service and its
