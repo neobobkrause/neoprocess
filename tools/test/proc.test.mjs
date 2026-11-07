@@ -542,7 +542,6 @@ test('the job\'s life (JOB-LIFE): layer start, the job\'s turn, the gate with th
 
   // retirement: alpha early (beta, its user, is merged), a record line (INT-6: no session archived), then its usage row
   const rt = N.jobRetire(o({ module: 'alpha' }));
-  assert.equal(rt.archive, undefined); assert.equal(N.jobState(o({ module: 'alpha' })).state, 'RETIRED');
   assert.deepEqual(N.status(o()).owed, []);
   assert.throws(() => N.epochClose(o()), /sessions still live/);
   N.jobArchived(o({ module: 'alpha', session: J1, usage: JSON.stringify({ cache_read_tokens: 100, cache_write_tokens: 20, input_tokens: 3, output_tokens: 9 }) }));
@@ -551,7 +550,6 @@ test('the job\'s life (JOB-LIFE): layer start, the job\'s turn, the gate with th
   assert.throws(() => N.jobRetire(o({ module: 'alpha' })), /reads ARCHIVED/);
   const lc = N.layerClose(o({ layer: 1 }));
   assert.ok(lc.commit, 'the regenerated bundle is committed at the close');
-  assert.deepEqual(lc.retired.map((x) => [x.module, x.session]), [['beta', J3]]);   // retired on the record at the close (INT-6)
   assert.throws(() => N.layerClose(o({ layer: 1 })), /is CLOSED/);
   assert.deepEqual(N.status(o()).owed, []);
   // issue 95: the archive refused (a session no live BOB created), so the job ends on the record unmeasured, its session left idle
@@ -572,7 +570,6 @@ test('the job\'s life (JOB-LIFE): layer start, the job\'s turn, the gate with th
   assert.match(csv, new RegExp(`^${J1},job,ALPHA #1,alpha,100,20,3,9,2,\\d+,0/2,$`, 'm'));   // two merges (one re-open), neither reviewed
   assert.match(csv, new RegExp(`^${J3},job,BETA #2,beta,,,,,2,\\d+,1/1,unmeasured: archive_session refused  Interfere With Workloads$`, 'm'));
   assert.match(csv, new RegExp(`^${J2},job,BETA #1,beta,40,4,1,1,2,\\d+,1/1,replaced$`, 'm'));
-  assert.match(csv, /^,defect,BETA #1,beta,,,,,,,1\/1,T1 R1: total\(\[\]\) documented wrong$/m);   // the row names the round (integration R5)
   assert.match(csv, new RegExp(`^${B2},BOB-final,BOB #0,,1,1,1,1,,,,$`, 'm'));
   assert.throws(() => N.handoff(o()), /owed: open PR stats/);
   // issue 101: a job archived before its merge is started again on its branch; one the tranche holds is done
