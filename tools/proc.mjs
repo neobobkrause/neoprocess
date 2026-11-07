@@ -67,7 +67,7 @@ import { serviceBlocks, readingSet, strike, usesOf, budgetOf, overrun, MEASUREME
 export { versionCommand as versionCheck, GRANTS_FILE, GRANTS_PRODUCT, GRANTS_FRESH_H, EXPIRY_WARN_D } from './platform.mjs';
 // The integration module (layer 3, N2-27 to N2-29): the review, the merge and its record, the layer's close, the close
 // pull request's merge, retirement, a BOB's release and a defect.
-import { reviewDecide, reviewResult, merge, merged, layerClose, closeMerge, jobRetire, bobRelease, defect, WORKERS_FILE, runningWorkers } from './integration.mjs';
+import { reviewDecide, reviewResult, merge, merged, layerClose, closeMerge, jobRetire, bobRelease, defect, WORKERS_FILE, runningWorkers, DONE } from './integration.mjs';
 export { reviewDecide, reviewResult, merge, merged, layerClose, closeMerge, jobRetire, bobRelease, defect, WORKERS_FILE, runningWorkers };
 
 export const PROCESS = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -977,7 +977,7 @@ const jobPath = (m) => `jobs/${m}.md`;
 const jobOf = (R, m) => parseJob(stateRead(R, jobPath(m)) || '');
 const loadJob = (R, m) => jobOf(R, m) ?? refuse(`no job for ${m} on the state branch`);
 const saveJob = (R, m, j, msg) => stateWrite(R, { [jobPath(m)]: fmtJob(m, j) }, msg);
-const done = (R, m) => ['MERGED', 'ARCHIVED'].includes(jobOf(R, m)?.state);
+const done = (R, m) => DONE.includes(jobOf(R, m)?.state);
 // `ready after <m>` is BOB's act (cleared by `proc merged` for m), never the job's: left out of what the job owes
 // (BETA #1's REPORT 2, 29 Oct: a job complete before the module it waits on had merged could not end a turn).
 const owedByJob = (j) => (j?.owed || []).filter((x) => !/^ready after /.test(x));

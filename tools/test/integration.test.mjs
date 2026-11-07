@@ -234,6 +234,12 @@ test('R5 retirement and a BOB\'s release are record lines; a defect is a metrics
   assert.equal(line(w, 'alpha').state, 'RETIRED'); assert.equal(line(w, 'alpha').session, J1);
   assert.match(rt.then, /^proc job archived --module alpha --session session_01A+ --usage/);
   assert.throws(() => I.jobRetire(o({ module: 'alpha' })), /reads RETIRED/);
+  // a retired job's work is on the tranche: a module the plan orders after it may merge
+  assert.deepEqual(I.DONE, ['MERGED', 'RETIRED', 'ARCHIVED']);
+  const b2 = complete(w, 'beta', { name: 'BETA #1', session: J2, pr: 12, change: append('beta/src/index.mjs', '// R1 again\n'), after: ['alpha'] });
+  out(I.reviewDecide(o({ module: 'beta', noReview: true, reason: 'a comment' })));
+  void b2;
+  assert.equal(out(I.merge(o({ module: 'beta', head: ghUpdate(w, 'beta'), gate: 'success' }))).merge.pullNumber, 12);
   // a BOB's release: a record line in the plan; its session left idle
   const p = parsePlan(stateRead(w.R, 'plan.md'));
   stateWrite(w.R, { 'plan.md': fmtPlan({ ...p, retiring: [{ name: 'BOB #1', session: B1, state: 'running' }] }) }, 'BOB #1 retiring');

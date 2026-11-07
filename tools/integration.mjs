@@ -47,7 +47,7 @@ const jobOf = (R, m) => parseJob(stateRead(R, jobPath(m)) || '');
 const loadJob = (R, m) => jobOf(R, m) ?? refuse(`no job for ${m} on the state branch`);
 const saveJob = (R, m, j, msg) => stateWrite(R, { [jobPath(m)]: fmtJob(m, j) }, msg);
 // A job whose work is on the tranche: merged, or retired after its merge (R5).
-const DONE = ['MERGED', 'RETIRED', 'ARCHIVED'];
+export const DONE = Object.freeze(['MERGED', 'RETIRED', 'ARCHIVED']);
 const done = (R, m) => DONE.includes(jobOf(R, m)?.state);
 // planning: the running plan and its tranche id (planning R1).
 const PLAN = 'build/plan/current.md';
