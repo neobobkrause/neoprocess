@@ -18,7 +18,7 @@ The CI gate on a pull request: the module's own suite and the checks scoped to i
 
 **workflow(R) → the gate workflow text**
 - **R5** Renders the product's gate workflow from `tools/gate.yml.tmpl`: triggered only by changes under the module's paths and tests, the files the checks read for it and generated inputs, never by a record path (`record.paths()`), once per pull request tip; a green tip whose base differs from the tranche only by record paths merges as it stands (`gateNeutral`). (GAT-6; REC-4) *(not yet met: N2)*
-- **R6** The gate's findings are the machine-readable result of `architecture` R3, which the merge and `status` read. (GAT-7) *(not yet met: N2)*
+- **R6** The gate's findings are the machine-readable result of `architecture` R3, which the merge and `status` read. (GAT-7; ARC-5, K26) *(not yet met: N2)*
 
 **regression(R) → the workflow dispatch**
 - **R7** The full product regression is its own workflow with its own time budget, dispatched only by the tranche close for a release or on Bob's word; no step runs in a session longer than the platform's background limit. (GAT-8; PLT-5) *(not yet met: N2)*

@@ -91,8 +91,10 @@
         "tools/test/planning.test.mjs"
       ],
       "uses": [
+        "platform",
         "record",
-        "requirements"
+        "requirements",
+        "architecture"
       ],
       "from": [
         "proc-legacy"
@@ -149,6 +151,8 @@
       "uses": [
         "platform",
         "record",
+        "requirements",
+        "architecture",
         "planning",
         "jobs",
         "gate"
