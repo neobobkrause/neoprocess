@@ -4,8 +4,8 @@
 // Extracted from tools/proc.mjs (N2-19 to N2-22). It reaches git and the record only through tools/record.mjs, the
 // platform only through tools/platform.mjs, and a requirements file only through tools/requirements.mjs.
 //
-// What a module after this one provides (the asks of `messages`, the lanes of `sessions`, the process's freshness of
-// `maintenance`, the record files the gate does not read of `integration`, the artifacts' regeneration of the gate) is
+// What a module after this one, or one it does not use, provides (the asks of `messages`, the lanes of `sessions`, the
+// process's freshness of `maintenance`, the record files the gate does not read and the artifacts' regeneration of `gate`) is
 // passed in by the caller that has it, by `wire`, and each one's absence is said where it matters: nothing here imports
 // a later module (P4).
 import { spawnSync, execFileSync } from 'node:child_process';
@@ -14,6 +14,8 @@ import { join } from 'node:path';
 import { PROCESS, processHead } from './platform.mjs';
 import { TRANCHE, jobBranch, stateBranch, refuse, repo, ghRepo, readRole, unpushed, commitPush, epoch, needEpoch, stateRead, stateWrite, parsePlan, planEdit as recordPlanEdit, metricsRow, unmeasuredRow, USAGE_FIELDS, METRICS_HEAD, jobFiles, addr as recordAddr, PLAN_FILE, ROLE_FILE } from './record.mjs';
 import { readingSet, strike, budgetOf, overrun, MEASUREMENT_RULE } from './requirements.mjs';
+// The plan as planning reads it (layer 3, earlier in the order): the tranche's id, the entries, the sections, a layer in part.
+import { tranche, trancheId, entries, planSections, partialCheck, partial } from './planning.mjs';
 
 export const LIMIT = 4096;                        // a START, a brief (SESSIONS §6; rulebook SES 4)
 export const MODEL = { opus: 'claude-opus-5-5', sonnet: 'claude-sonnet-5-5' };
@@ -37,7 +39,6 @@ const WIRED = {
   versionLine: () => '',             // maintenance: (to) → the start prompt's version line (MNT-3)
   gateNeutral: null,                 // integration: (R, m, head) → { files, held }; unwired, a branch behind the tranche merges it first
   withArtifacts: (R, fn) => fn(),    // gate: the artifacts regenerated for a run and put back (JOB-LIFE §4)
-  archivedTranche: () => null,       // planning: the archived plan's id, between rounds
 };
 export function wire(deps) { for (const [k, v] of Object.entries(deps || {})) { if (!(k in WIRED)) refuse(`wire: no service ${k}`); WIRED[k] = v; } return Object.keys(WIRED); }
 
@@ -47,17 +48,8 @@ const sized = (text, what) => { const n = Buffer.byteLength(text, 'utf8'); if (n
 const fileText = (f, what) => (typeof f === 'string' && existsSync(f) ? readFileSync(f, 'utf8').trim() : refuse(`${what}: no such file`));
 export function modules(R) { const all = JSON.parse(R.read('build/modules.json') || '[]'); return Array.isArray(all) ? all : all.modules || []; }
 const mod = (R, m) => modules(R).find((x) => x.id === m) ?? refuse(`no module ${m} in build/modules.json`);
-// The entries of one module in one layer of the running plan (`## Layer <n>`, then `**<module>**` and its lines).
-export function entriesOf(planText, layer, m) {
-  const sec = String(planText || '').split(/^## /m).find((s) => s.startsWith(`Layer ${layer}`)) || '';
-  const block = sec.split(/^\*\*/m).find((b) => b.startsWith(`${m}**`));
-  return block ? block.slice(m.length + 2).trim() : '';
-}
-// The tranche's id, from the running plan's title (`# Plan: … T<n>`; JOB-LIFE §1).
-export function planId(R) {
-  const text = R.read(PLAN_FILE) ?? refuse(`${PLAN_FILE}: no running plan on this checkout`);
-  return { id: text.match(/^# Plan: .*?\b([A-Z]+\d+[a-z]?)\s*$/m)?.[1] ?? refuse(`${PLAN_FILE}: the title names no tranche id (\`# Plan: … T<n>\`)`), text };
-}
+// The entries of one module in one layer of the running plan, as planning reads them, one line each.
+export const entriesOf = (planText, layer, m) => entries(planText).filter((e) => e.layer === Number(layer) && e.module === m).map((e) => e.text).join('\n');
 // The generated artifacts' paths, from the manifest's "Generated artifacts" table (its first cell's code spans).
 export function artifactPaths(R) {
   const sec = (R.read('build/manifest.md') || '').split(/^## /m).find((s) => /^Generated artifacts/.test(s)) || '';
@@ -168,17 +160,18 @@ function nextK(R, T, m) {
 // R1: each module of the layer with entries: its branch at the tranche tip, its START (≤ 4 KB) on the state branch, the
 // draft pull request with the START as its body, and the session call; every set measured before any branch is made.
 export function layerStart(o) {
-  const R = repo(o.product), L = Number(o.layer); if (!L) refuse('--layer <n> [--modules a,b] [--mechanical a,b] [--usage <rate_limit_info.status>]');
+  const R = repo(o.product), L = Number(o.layer); if (!L) refuse('--layer <n> [--modules a,b --reason "<why in part>"] [--mechanical a,b] [--usage <rate_limit_info.status>]');
   // A weekly warning is no stop (Bob, K5722); only a status that refuses use stops new jobs (K5323; rulebook USE 7).
   if (o.usage && !['allowed', 'allowed_warning'].includes(o.usage)) refuse(`usage status is "${o.usage}": no new job starts; tell Bob in one line (K5323)`);
   on(R, TRANCHE);
   if (unpushed(R).length) refuse(`the tranche checkout is not pushed: ${unpushed(R).join('; ')}`);
-  const { id: T, text } = planId(R), plan = parsePlan(stateRead(R, 'plan.md') || '');
+  const { id: T, text } = tranche(R), plan = parsePlan(stateRead(R, 'plan.md') || '');
   if (!plan.bob) refuse('no BOB in the plan\'s Status line: run takeover first');
   if (plan.stop) refuse(`the build is STOPPED (${plan.stop.why} · ${plan.stop.version}): no job starts until it resumes`);
-  const sections = [...new Set([...text.matchAll(/^## Layer (\d+)/gm)].map((x) => Number(x[1])))].sort((a, b) => a - b);
+  const sections = planSections(text);
   if (!sections.includes(L)) refuse(`layer ${L} has no section in ${PLAN_FILE}`);
   const only = String(o.modules || '').split(',').filter(Boolean), mechanical = String(o.mechanical || '').split(',').filter(Boolean);
+  const part = only.length && plan.layers[L] !== 'STARTED' ? partialCheck(text, L, only, o.reason) : null;   // a layer started in part names its reason (PLN-8)
   const lower = sections.filter((l) => l < L && plan.layers[l] !== 'CLOSED');
   if (lower.length) refuse(`layer ${lower[0]} is ${plan.layers[lower[0]] || 'OPEN'}: layers run lowest first (P10)`);
   if (plan.layers[L] === 'CLOSED') refuse(`layer ${L} is closed`);
@@ -217,7 +210,8 @@ export function layerStart(o) {
   }
   const commit = stateWrite(R, files, `layer ${L} starts: ${mods.map((m) => m.id).join(', ')}`);
   planEdit(R, (p) => ({ ...owe(p, owed), layers: { ...p.layers, [L]: 'STARTED' } }), `layer ${L} started`);
-  return { tranche: T, layer: L, commit, jobs };
+  const parted = part ? partial(R, L, only, o.reason) : null;   // the subset on the plan's record (planning R4)
+  return { tranche: T, layer: L, commit, jobs, part: parted };
 }
 
 // ---- the job's record as BOB writes it: its PR and its session (R3) ----
@@ -415,7 +409,7 @@ export function jobComplete(o) {
     const held = WIRED.gateNeutral ? WIRED.gateNeutral(R, m, R.g(['rev-parse', 'HEAD'])).held : [{ file: `origin/${TRANCHE}`, why: 'its changes since your base are unread here' }];
     if (held.length) refuse(`merge ${TRANCHE} into your branch first: BOB has changed ${held.map((h) => `${h.file} (${h.why})`).join(', ')}`);
   }
-  const { id: T } = planId(R);
+  const { id: T } = tranche(R);
   // the job's own review first (K14): the reviewer's brief, its result approving; every gap is fixed before completing
   const result = join(R.root, '.git', `proc-self-review-${m}.md`);
   if (!o.reviewFile) {
@@ -491,7 +485,7 @@ export function jobReopen(o) {
     const commit = saveJob(R, m, { ...j, state: 'WORKING', owed: [], review: null, merge: null }, `${m}: re-opened on a CHANGE before its merge`, { [`jobs/${m}/start.md`]: `${stateRead(R, `jobs/${m}/start.md`) || ''}\n${change}\n` });
     return { commit, state: 'WORKING', draft: { tool: 'update_pull_request', ...ghRepo(R), pullNumber: j.pr, draft: true }, send: { session_id: j.session, message: `${change}\n(Your job is WORKING again on ${jobBranch(m)} and PR #${j.pr}: fix, then \`proc job complete\` again.)` } };
   }
-  const { id: T } = planId(R), tip = R.g(['rev-parse', 'HEAD']);
+  const { id: T } = tranche(R), tip = R.g(['rev-parse', 'HEAD']);
   jobBranchAt(R, m, tip, `${j.name} re-opens: ${T}, module ${m}`);
   const start = sized(startText(R, m, j.name, T, 're-opened after its merge', change, o), 'the re-opened START');
   const commit = stateWrite(R, { [jobPath(m)]: fmtJob(m, { ...j, state: 'REOPENED', pr: null, owed: [], review: null, merge: null }), [`jobs/${m}/start.md`]: start }, `${m}: re-opened`);
@@ -542,7 +536,7 @@ export function jobRetire(o) {
   const x = mod(R, m);
   const users = modules(R).filter((y) => y.layer === x.layer && (y.uses || []).includes(m)).map((y) => [y.id, jobOf(R, y.id)]).filter(([, u]) => u && !['MERGED', 'ARCHIVED'].includes(u.state));
   if (users.length) refuse(`running jobs of the layer use ${m}: ${users.map(([id, u]) => `${id} ${u.state}`).join(', ')} (a change to a provider re-opens a user mid-layer)`);
-  const T = planId(R).id, why = o.unmeasured ?? (o.usage == null ? 'no platform act returns a session\'s usage (platform acts: none carries the four counts)' : null);
+  const T = tranche(R).id, why = o.unmeasured ?? (o.usage == null ? 'no platform act returns a session\'s usage (platform acts: none carries the four counts)' : null);
   noRow(R, T, j.session);
   const commit = writeRow(R, T, attemptRow(R, m, j, j.session, j.name, o.usage, why), `metrics ${T}: ${j.name} retired${why ? ', unmeasured' : ''}`);
   saveJob(R, m, { ...j, state: 'ARCHIVED', retired: `${today()} · session left idle` }, `${m}: retired (ARCHIVED)`);
@@ -555,7 +549,7 @@ export function jobArchived(o) {
   const R = repo(o.product), m = o.module; if (!m || !SESSION.test(o.session || '') || (o.usage == null) === (o.unmeasured == null)) refuse('--module <m> --session <id> and either --usage <json> or --unmeasured "<why the usage could not be read>"');
   if (o.unmeasured != null && !String(o.unmeasured).trim()) refuse('--unmeasured "<why>": name the refusal (its words, or its refusal id)');
   on(R, TRANCHE);
-  const j = loadJob(R, m), T = planId(R).id, name = o.name || j.name;
+  const j = loadJob(R, m), T = tranche(R).id, name = o.name || j.name;
   noRow(R, T, o.session);
   const commit = writeRow(R, T, attemptRow(R, m, j, o.session, name, o.usage, o.unmeasured), `metrics ${T}: ${name} ${o.unmeasured != null ? 'left idle, unmeasured' : 'archived'}`);
   if (j.session === o.session && j.state !== 'ARCHIVED') { saveJob(R, m, { ...j, state: 'ARCHIVED' }, `${m}: ARCHIVED`); planEdit(R, (p) => clear(p, `archive ${m}`), `${m} archived`); }
@@ -565,7 +559,7 @@ export function jobArchived(o) {
 export function defect(o) {
   const R = repo(o.product), m = o.module; if (!m || !o.what) refuse('--module <m> --what "<the defect, one line>"');
   on(R, TRANCHE);
-  const T = o.tranche || (R.read(PLAN_FILE) ? planId(R).id : WIRED.archivedTranche(R) ?? refuse(`${PLAN_FILE}: no running plan and no archived one: --tranche <T>`));
+  const T = trancheId(R, o.tranche);
   const csv = metricsCsv(R, T), cur = R.read(csv) || '';
   const last = cur.split('\n').map((l) => l.split(',')).filter((c) => c[1] === 'job' && c[3] === m).pop();
   const reviewed = last?.[10] || 'unknown';

@@ -98,6 +98,15 @@ test('R1 layer start: lowest layer first; every set measured before any branch; 
   assert.deepEqual([plan.owed, plan.layers[1]], [['open PR core', 'start core', 'open PR app', 'start app'], 'STARTED']);
   assert.throws(() => J.layerStart(w.o({ layer: 1 })), /name the modules/);
 
+  // a layer started in part names its reason, and the subset is on the plan's record (planning R4; PLN-8)
+  const part = world();
+  assert.throws(() => J.layerStart(part.o({ layer: 1, modules: 'core' })), /names the architecture session's reason/);
+  assert.deepEqual(part.R.heads('refs/heads/job/*'), []);
+  const lp = J.layerStart(part.o({ layer: 1, modules: 'core', reason: 'app waits for core' }));
+  assert.deepEqual([lp.jobs.map((j) => j.module), lp.part.modules, lp.part.rest], [['core'], ['core'], ['app']]);
+  assert.match(readFileSync(join(part.bob, 'build/plan/current.md'), 'utf8'), /^\*\*Started in part\*\* · \S+ · core · app waits for core$/m);
+  assert.equal(J.entriesOf(readFileSync(join(part.bob, 'build/plan/current.md'), 'utf8'), 1, 'core'), '- N1 · Add `triple(x)` (R2).');
+
   // a set over its budget: recorded, and no job of the call starts, not even a module measured within it
   const big = world({ 'build/requirements/app.md': `${PRODUCT['build/requirements/app.md']}\n${'- a long private note, kept for the test.\n'.repeat(Math.ceil(J.SET_BUDGET / 40))}` });
   assert.throws(() => J.layerStart(big.o({ layer: 1 })), /app: its own set is \d+ bytes, over its budget of 450000 .*BLOCKED: reading/);
