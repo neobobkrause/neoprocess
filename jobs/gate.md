@@ -1,6 +1,6 @@
 # gate (transient)
 
-**Status** · GATE #1 · session_012hdw2StqkU6bBuPANTaH3p · MERGED · PR #133
+**Status** · GATE #1 · session_012hdw2StqkU6bBuPANTaH3p · ARCHIVED · PR #133
 **Runs** · 2
 **Owed** · none
 **Model** · opus
@@ -8,3 +8,4 @@
 **Merge** · merged 7337ea3 2026-11-07
 **Reviews** · 1
 **Merges** · 7337ea3 2026-11-07 reviews:1
+**Retired** · 2026-11-07 · session left idle
