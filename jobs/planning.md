@@ -1,6 +1,6 @@
 # planning (transient)
 
-**Status** · PLANNING #1 · session_012hdw2Qj3qLqne5WMmhMyGq · MERGED · PR #131
+**Status** · PLANNING #1 · session_012hdw2Qj3qLqne5WMmhMyGq · ARCHIVED · PR #131
 **Runs** · 3
 **Owed** · none
 **Model** · opus
@@ -8,3 +8,4 @@
 **Merge** · merged 021a6ff 2026-11-07
 **Reviews** · 2
 **Merges** · 021a6ff 2026-11-07 reviews:2
+**Retired** · 2026-11-07 · session left idle
