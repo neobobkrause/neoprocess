@@ -1,6 +1,6 @@
 # integration (transient)
 
-**Status** · INTEGRATION #1 · session_012hdw2Uabh8Qb9BxEJwdVpD · MERGED · PR #134
+**Status** · INTEGRATION #1 · session_012hdw2Uabh8Qb9BxEJwdVpD · ARCHIVED · PR #134
 **Runs** · 2
 **Owed** · none
 **Model** · opus
@@ -9,3 +9,4 @@
 **Reviews** · 1
 **Merges** · 9a15900 2026-11-07 reviews:1
 **Suite** · 21897 ms
+**Retired** · 2026-11-07 · session left idle
