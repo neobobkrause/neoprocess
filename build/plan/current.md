@@ -106,6 +106,7 @@ proc-legacy (no job: retired by the jobs above)
 - N2-47 · REC-7's fixture (K3): N2-8's halted-build fixture rebuilt from a frozen copy of Civicsmith's real state branch and handoff of 30 Oct, once a session on this account can read that repository (the record job built it from the measured description, its report of 30 Oct).
 - N2-48 · REC-3, ARC-5 (architecture's report J2, K22): `status` lists the checks' findings from their one result file (`checks/result.json`, or the manifest row's path), read as JSON by record itself, since record is earlier than architecture and cannot import it.
 - N2-54 · REC-1, record R5 and R12 (gate's report, K27): `paths()` names every record of the architecture session on the tranche, `build/rulings.md` and `build/summaries/` among them, so no record path triggers a gate (GAT-6).
+- N2-55 · REC-3, record R6 and R10, PLN-5 (planning's report, K30): `pinOf` reads the durable Status line's exact forms, `RESUMED <sha>` and `STOPPED <why> · <sha>`, the latest winning, so a resume is seen after the epoch's state branch is gone.
 
 **requirements**
 - N2-50 · REQ-1, requirements R8 (architecture's report, K23): `parse` and `marks` count a bold `**R<n>**` wherever it stands on its line (an id after a service's signature, as products' files write it: BOB #38's ruling), so the parser accepts every requirements file on a product's tranche as it stands.

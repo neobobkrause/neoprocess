@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import * as N from '../proc.mjs';
 import { versionCommand, processHead } from '../platform.mjs';
 import { MEASUREMENT_RULE, budgetOf } from '../requirements.mjs';
+import * as P from '../planning.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url)), TOY = join(HERE, '..', '..', 'dryrun');
 const B1 = 'session_01BBBBBBBBBBBBBBBBBBBBBBBB', B2 = 'session_01BBBBBBBBBBBBBBBBBBBBBBB2', J1 = 'session_01AAAAAAAAAAAAAAAAAAAAAAAA', L1 = 'session_01LLLLLLLLLLLLLLLLLLLLLLLL';
@@ -664,20 +665,19 @@ test('the one skill\'s reading, the shims written and checked for drift, the gat
 
 test('a tranche opened from main, a round opened and closed, the tranche closed by its one PR and its branch gone (JOB-LIFE §1, §10)', () => {
   const w = world({ noTranche: true }), R = N.repo(w.bob.dir), o = (x) => ({ product: w.bob.dir, ...x }), g2 = (...a) => g(w.bob.root, ...a);
-  g2('rm', '-q', '-r', 'toy/build/plan'); g2('commit', '-q', '-m', 'no plan'); g2('push', '-q', 'origin', 'HEAD:main');   // the toy's old plans are not this test's
-  const plan = f(w.base, 'plan.md', '# Plan: test T2\n\n**Status** · OPEN.\n\n## Layer 1\n\n**alpha**\n- N1 · A line.\n');
-  assert.throws(() => N.trancheOpen(o({ planFile: f(w.base, 'bad.md', '# Plan: no id\n\n## Layer 1\n') })), /names the tranche/);
-  assert.throws(() => N.trancheOpen(o({ planFile: f(w.base, 'big.md', `# Plan: test T9\n\n## Layer 1\n\n**alpha**\n- N1 · ${'x'.repeat(N.PLAN_LIMIT)}\n`) })), /limit is 51200/);   // SESSIONS §6.3
-  assert.throws(() => N.trancheOpen(o({ planFile: plan })), /grants are not proven held/);   // PERMISSIONS §10.3
+  // the next tranche's plan on main, opened by planning (its R1; planning's tranche open and close are async, K29)
+  const next = (T, line) => `# Plan: test ${T}\n\n**Status** · OPEN · the process pinned at \`abc1234\`.\n\n**The legacy census** · none.\n\n## Layer 1\n\n**alpha**\n- ${line}\n`;
+  g2('rm', '-q', '-r', 'toy/build/plan'); mkdirSync(join(w.bob.dir, 'build/plan')); writeFileSync(join(w.bob.dir, P.NEXT), next('T2', 'N1 · A line. · hard reason: a measurement')); g2('add', '-A'); g2('commit', '-q', '-m', 'no plan but the next'); g2('push', '-q', 'origin', 'HEAD:main');   // the toy's old plans are not this test's
+  return (async () => { await assert.rejects(P.trancheOpen(o()), /grants are not proven held/);   // PERMISSIONS §10.3
   heldGrants(w.bob.root);
-  const to = N.trancheOpen(o({ planFile: plan }));
+  const to = await P.trancheOpen(o());
   assert.deepEqual([to.tranche, to.round, to.layers, R.branch()], ['T2', 1, [1], 'tranche']);
   assert.equal(g2('rev-parse', 'origin/tranche'), g2('rev-parse', 'HEAD'));
   assert.match(readFileSync(join(w.bob.dir, 'build/plan/current.md'), 'utf8'), /^# Plan: test T2/);
-  assert.throws(() => N.trancheOpen(o({ planFile: plan })), /holds work not on main/);
+  await assert.rejects(P.trancheOpen(o()), /holds work not on main/);
   N.epochOpen(o()); N.takeover(o({ name: 'BOB #1', session: B1 }));
-  assert.throws(() => N.roundOpen(o({ planFile: plan })), /a round is running: layer\(s\) 1/);
-  assert.throws(() => N.trancheClose(o()), /a round is open/);
+  assert.throws(() => N.roundOpen(o({ planFile: P.PLAN })), /a round is running: layer\(s\) 1/);
+  await assert.rejects(P.trancheClose(o(), N.PLANNING_DEPS), /a round is open/);
   // the layer run (its jobs' lives are the other test's): the state written as the commands leave it
   N.layerStart(o({ layer: 1 }));
   assert.throws(() => N.roundClose(o()), /layer\(s\) 1 not closed/);
@@ -701,8 +701,7 @@ test('a tranche opened from main, a round opened and closed, the tranche closed 
   N.stateWrite(R, { 'plan.md': `# Plan (transient)\n\n**Status** · OPEN · BOB #1 · ${B1}\n**Owed** · none\n**Layers** · 1 CLOSED\n` }, 'round 3 run');
   const last = N.roundClose(o());
   assert.deepEqual([last.round, last.next, existsSync(join(w.bob.dir, 'build/plan/current.md')), existsSync(join(w.bob.dir, 'build/plan/next.md'))], [3, null, false, true]);
-  rmSync(join(w.bob.dir, 'build/plan/next.md')); N.commitPush(R, N.TRANCHE, ['build/plan/next.md'], 'the next tranche list moved out for this test');
-  assert.throws(() => N.roundOpen(o({ planFile: f(w.base, 'p3.md', '# Plan: test T3\n\n## Layer 1\n\n**alpha**\n- N3 · x\n') })), /opens with a new tranche/);
+  writeFileSync(join(w.bob.dir, P.NEXT), next('T3', 'N3 · x · hard reason: a measurement')); N.commitPush(R, N.TRANCHE, [P.NEXT], 'the next tranche\'s plan, carried to main by the close (planning R1)');
   // after the last round no plan runs: a refusal is still routed and counted under the tranche (DRYRUN §4.19)
   const rf = N.refused(o({ act: 'archive_session(child)', kind: 'classifier', reason: 'Interfere With Workloads', by: 'NEOPROCESS #6' }));
   // issue 76: a report filed under the archive after the plans does not hide the last archived plan
@@ -712,12 +711,12 @@ test('a tranche opened from main, a round opened and closed, the tranche closed 
   assert.match(readFileSync(join(w.bob.dir, 'build/metrics/T2.csv'), 'utf8'), /^,refusal,NEOPROCESS #6,neoprocess,.*archive_session\(child\) · predicted · Bob archives it$/m);
   const fp = N.footprint(o());
   assert.ok(fp.commits > 0); assert.equal(fp.kinds.product, 0);   // only build state moved: bookkeeping
-  const tc = N.trancheClose(o());
+  const tc = await P.trancheClose(o(), N.PLANNING_DEPS);
   assert.deepEqual([tc.tranche, tc.pr.head, tc.pr.base, tc.pr.title, tc.pr.draft], ['T2', 'tranche', 'main', 'T2: close', false]);
   assert.equal(N.status(o()).bob.session, B1); assert.deepEqual(N.status(o()).owed, ['merge tranche']);
   assert.equal(N.parsePlan(N.stateRead(R, 'plan.md')).state, 'CLOSING');
   assert.deepEqual([tc.merge.tool, tc.merge.merge_method, tc.merge.expectedHeadSha], ['merge_pull_request', 'merge', g2('rev-parse', 'origin/tranche')]);
-  assert.throws(() => N.trancheClose(o()), /acts still owed/);
+  await assert.rejects(P.trancheClose(o(), N.PLANNING_DEPS), /acts still owed/);
   assert.throws(() => N.trancheMerged(o({ sha: g2('rev-parse', 'origin/main') })), /is not in/);   // main's tip does not hold the tranche yet
   // the close PR merged (here: the merge made on main by hand) and recorded; the branch is gone; the epoch can close
   g2('checkout', '-q', 'main'); g2('merge', '-q', '--no-ff', '-m', 'T2: close (#1)', 'origin/tranche'); g2('push', '-q', 'origin', 'HEAD:main');
@@ -735,7 +734,7 @@ test('a tranche opened from main, a round opened and closed, the tranche closed 
   const lastBob = { name: 'BOB #1', session: B1, usage: JSON.stringify({ cache_read_tokens: 7, cache_write_tokens: 6, input_tokens: 5, output_tokens: 4 }) };
   assert.throws(() => N.bobArchived(o({ ...lastBob, tranche: 'T2' })), /tranche is closed \(on main whole\)/);
   // the next tranche: the branch fast-forwarded to main (a merged tranche is on main whole), the new plan current
-  const t3 = N.trancheOpen(o({ planFile: f(w.base, 'p3.md', '# Plan: test T3\n\n**Status** · OPEN.\n\n## Layer 1\n\n**alpha**\n- N3 · x\n') }));
+  const t3 = await P.trancheOpen(o());
   assert.deepEqual([t3.tranche, t3.round, t3.from], ['T3', 1, g2('rev-parse', '--short', 'origin/main')]);
   assert.equal(g2('rev-parse', 'origin/tranche~1'), g2('rev-parse', 'origin/main'));
   assert.match(readFileSync(join(w.bob.dir, 'build/plan/current.md'), 'utf8'), /^# Plan: test T3/);
@@ -745,6 +744,7 @@ test('a tranche opened from main, a round opened and closed, the tranche closed 
   assert.match(readFileSync(join(w.bob.dir, 'build/metrics/T2.csv'), 'utf8'), new RegExp(`^${B1},BOB-final,BOB #1,,7,6,5,4,,,,$`, 'm'));
   assert.equal(existsSync(join(w.bob.dir, 'build/metrics/T3.csv')), false);
   assert.throws(() => N.bobArchived(o({ ...lastBob, tranche: 'T2' })), /already has its row/);
+  })();
 });
 
 test('repo setup makes a development repository and its two rulesets, idempotently, and reads them back; from a session the proxy refuses the writes and the workflow\'s dispatch is printed (PERMISSIONS §9)', async () => {

@@ -26,7 +26,7 @@
 //   lane open --id <ID> --area "<…>" --charter-file <f> --canon <p1,p2> [--dormant]      lane started --id <ID> --name "<ID> #k" --session <id>
 //   lane state --id <ID> [--set <WORKING | "WAITING: …" | "BLOCKED: …" | "NEEDS BOB: …">]      lane charter --id <ID> --charter-file <f> --why "<…>"      lane route --id <ID> [--session-status <s>] [--context-pct <n>]
 //   lane close --id <ID> --why "<…>"      lane archived --id <ID> --session <id> --usage <json>
-//   layer start --layer <n> [--modules a,b] [--mechanical a,b]      layer close --layer <n>
+//   layer start --layer <n> [--modules a,b --reason "<why a part first>"] [--mechanical a,b]      layer close --layer <n>
 //   job pr --module <m> --number <n>      job started --module <m> --name "<M> #k" --session <id>      job route --module <m> [--session-status <s>] [--context-pct <n>]
 //   job start --module <m> --session <id>      job state --module <m> [--set <state>]      job complete --module <m> --report-file <f>
 //   job takein --branch job/<tranche>/<m> [--sha <commit>]      (issue 84: the job's own module's branch from an earlier round)
@@ -37,7 +37,8 @@
 //   job reopen --module <m> --change-file <f>      job retire --module <m>      job archived --module <m> --session <id> --usage <json> | --unmeasured "<the refusal>"
 //   defect --module <m> --what "<…>"      bob archived --name "BOB #n" --session <id> --usage <json> [--tranche <T>]
 //   reading --role <bob|job|lane|root|process|onboard>      gate [--module <m>] [--base <ref>]      shims [--process <path>] [--repo <owner/name>] [--ref <branch>] [--check]
-//   tranche open --plan-file <f>      round open --plan-file <f>      round close      tranche close      tranche merged --sha <commit>      footprint [--base <ref>]
+//   tranche open      (the plan is build/plan/next.md on main)      round open (--plan-file <f> | --completion)      round close [--next <f>]      tranche close      tranche merged --sha <commit>      footprint [--base <ref>]
+//   tranche report [--tranche <T>] [--gate-runs '{"<m>": <n>}']      stop --why "<…>" --choices "<m> complete-allowed|abandoned, …"      resume --version <commit>      place --module <m> --entry "- <id> · …" [--defer bob|measurement|outside]      (tools/planning.mjs)
 //   ruling --text "<the ruling>" --why "<why>" [--module <m>] [--files <p1,p2>]      steps --file <steps.md> --source <p1,p2> (tools/lib.mjs, P20)
 //   say --file <draft.md> [--no-judge]      (issue 102: a message for Bob judged before it is sent; the turn's end skips what passed)
 //   repo setup --repo <owner/name> [--private] [--dry-run]      (PERMISSIONS §9: the repository and its two rulesets; from a session it prints the workflow's dispatch)
@@ -66,6 +67,9 @@ export { gateNeutral };
 import { Refused, processHead, versionCommand, ownerSecret, dispatch, grantsCheck as checkGrants, grantsHeld, knownIds, isKnown, WORKFLOWS } from './platform.mjs';
 // The requirements module (layer 2): the requirements file's parser, service blocks, the mark strike, the measurement line, a job's reading set.
 import { readingSet, strike, budgetOf, overrun, MEASUREMENT_RULE } from './requirements.mjs';
+// Tranches, rounds, a layer in part, stop and resume, placing, the report, rulings (layer 3; N2-16 to N2-18).
+import { tranche, trancheId, archivedTranche, roundOpen, roundClose, trancheCarry, trancheMerged, footprint, ruling, partialCheck, partial, place, report, stop, resume, trancheOpen, trancheClose as planTrancheClose } from './planning.mjs';
+export { tranche, trancheId, archivedTranche, PLAN_LIMIT, trancheOpen, roundOpen, roundClose, trancheCarry, trancheMerged, footprint, ruling, partial, partsOf, place, report, stop, resume } from './planning.mjs';
 export { versionCommand as versionCheck, GRANTS_FILE, GRANTS_PRODUCT, GRANTS_FRESH_H, EXPIRY_WARN_D } from './platform.mjs';
 // The integration module (layer 3, N2-27 to N2-29): the review, the merge and its record, the layer's close, the close
 // pull request's merge, retirement, a BOB's release and a defect.
@@ -966,14 +970,6 @@ const JOB_STATE = /^(WORKING|COMPLETE|WAITING: .+|BLOCKED: (tests|context|readin
 const MODEL = { opus: 'claude-opus-5-5', sonnet: 'claude-sonnet-5-5' };
 export const SET_TABLE = Object.freeze({ window: Number(process.env.NEO_CONTEXT_WINDOW) || 1_000_000, fraction: 0.15, bytesPerToken: 3 }), SET_BUDGET = budgetOf(SET_TABLE);   // a job's own set (SES-5; K19), until the sessions module holds the table (N2-31)
 const LIVE_JOB = /^(STARTING|WORKING|WAITING: |BLOCKED: |NEEDS BOB: |COMPLETE|REOPENED|MERGED)/;
-// The tranche's id lives in the plan's title (`# Plan: … D3`), never in a branch name (JOB-LIFE §1).
-export function tranche(R) {
-  const text = R.read(PLAN) ?? refuse(`${PLAN}: no running plan on this checkout`);   // R, or any { read } (a plan file about to open)
-  return { id: text.match(/^# Plan: .*?\b([A-Z]+\d+[a-z]?)\s*$/m)?.[1] ?? refuse(`${PLAN}: the title names no tranche id (\`# Plan: … T<n>\`)`), text };
-}
-// The tranche's id for a metrics row: the running plan's, or between rounds and after the last one the archived plan's
-// (BOB #3, 29 Oct: `refused routed` after the last round's close found no running plan; DRYRUN §4.19).
-export const trancheId = (R, given) => given || (R.read(PLAN) ? tranche(R).id : archivedTranche(R) ?? refuse(`${PLAN}: no running plan and no archived one: --tranche <T>`));
 const mod = (R, m) => modules(R).find((x) => x.id === m) ?? refuse(`no module ${m} in build/modules.json`);
 const jobPath = (m) => `jobs/${m}.md`;
 const jobOf = (R, m) => parseJob(stateRead(R, jobPath(m)) || '');
@@ -1033,6 +1029,7 @@ export function layerStart(o) {
   const sections = [...new Set([...text.matchAll(/^## Layer (\d+)/gm)].map((x) => Number(x[1])))].sort((a, b) => a - b);
   if (!sections.includes(L)) refuse(`layer ${L} has no section in ${PLAN}`);
   const only = String(o.modules || '').split(',').filter(Boolean), mechanical = String(o.mechanical || '').split(',').filter(Boolean);
+  const part = only.length && plan.layers[L] !== 'STARTED' ? partialCheck(text, L, only, o.reason) : null;   // a layer started in part names its reason (PLN-8)
   const lower = sections.filter((l) => l < L && plan.layers[l] !== 'CLOSED');
   if (lower.length) refuse(`layer ${lower[0]} is ${plan.layers[lower[0]] || 'OPEN'}: layers run lowest first (P10)`);
   if (plan.layers[L] === 'CLOSED') refuse(`layer ${L} is closed`);
@@ -1067,7 +1064,8 @@ export function layerStart(o) {
   }
   const commit = stateWrite(R, files, `layer ${L} starts: ${mods.map((m) => m.id).join(', ')}`);
   planEdit(R, (p) => ({ ...owe(p, owed), layers: { ...p.layers, [L]: 'STARTED' } }), `layer ${L} started`);
-  return { tranche: T, layer: L, commit, jobs };
+  const parted = part ? partial(R, L, only, o.reason) : null;
+  return { tranche: T, layer: L, commit, jobs, part: parted };
 }
 // The draft PR's number recorded; BOB subscribes to its events (JOB-LIFE §2).
 export function jobPr(o) {
@@ -1456,223 +1454,9 @@ jobs:
   return { files: Object.keys(files), drift, written: o.check ? [] : drift.map((d) => d.split(':')[0]) };
 }
 
-// ---- rounds and the tranche (JOB-LIFE §10; P10, P12): the plan on the tranche branch, its state on the state branch ----
-
-export const PLAN_LIMIT = 51200;                   // a round's plan (SESSIONS §6.3)
-const planSections = (text) => [...new Set([...text.matchAll(/^## Layer (\d+)/gm)].map((x) => Number(x[1])))].sort((a, b) => a - b);
-function planFile(o) {
-  const text = fileText(o.planFile, '--plan-file');
-  if (!/^# Plan: .*?\b[A-Z]+\d+[a-z]?\s*$/m.test(text)) refuse('the plan\'s title names the tranche: `# Plan: … T<n>`');
-  if (!planSections(text).length) refuse('the plan has no `## Layer <n>` section');
-  if (Buffer.byteLength(text, 'utf8') > PLAN_LIMIT) refuse(`the plan is ${Buffer.byteLength(text, 'utf8')} bytes; the limit is ${PLAN_LIMIT} (SESSIONS §6): a larger set is two rounds`);
-  return text;
-}
-// A round's plan becomes current whole; refused while a round runs (a layer started and not closed, or entries not yet run).
-export function roundOpen(o) {
-  const R = repo(o.product); on(R, TRANCHE);
-  const text = planFile(o), plan = epoch(R) ? parsePlan(stateRead(R, 'plan.md') || '') : { layers: {} };   // a tranche opens before its epoch
-  const cur = R.read(PLAN);
-  if (cur) { const open = planSections(cur).filter((l) => plan.layers[l] !== 'CLOSED'); if (open.length) refuse(`a round is running: layer(s) ${open.join(', ')} of the current plan not closed (close the round first)`); }
-  const T = tranche({ read: () => text }).id, curT = cur ? tranche(R).id : archivedTranche(R);   // between rounds the archive names the tranche
-  if (curT && curT !== T && !o.newTranche) refuse(`the current plan is ${curT}'s; a plan for ${T} opens with a new tranche`);
-  R.write(PLAN, text);
-  const commit = commitPush(R, TRANCHE, [PLAN], `plan ${T}: round R${roundNumber(R, T)} opens`);
-  if (epoch(R)) planEdit(R, (p) => ({ ...p, layers: {} }), 'round opens');
-  return { tranche: T, round: roundNumber(R, T), commit, layers: planSections(text) };
-}
-// the last archived plan by tranche number and round (issue 76: the last file in the folder was a report, so none was found)
-const archivedTranche = (R) => R.g(['ls-files', '--', R.rel('build/plan/archive')]).split('\n').map((f) => f.match(/\/([A-Z]+)(\d+)([a-z]?)-R(\d+)\.md$/)).filter(Boolean).sort((a, b) => Number(a[2]) - Number(b[2]) || a[3].localeCompare(b[3]) || Number(a[4]) - Number(b[4])).pop()?.slice(1, 4).join('') ?? null;
-const roundNumber = (R, T) => (R.g(['ls-files', '--', R.rel('build/plan/archive')]).split('\n').filter((f) => new RegExp(`/${T}-R\\d+\\.md$`).test(f)).length) + 1;
-// Every layer closed, nothing owed, every job archived: the plan is archived whole; `next.md` becomes current if it exists.
-export function roundClose(o) {
-  const R = repo(o.product); on(R, TRANCHE);
-  const { id: T, text } = tranche(R), plan = parsePlan(stateRead(R, 'plan.md') || '');
-  const open = planSections(text).filter((l) => plan.layers[l] !== 'CLOSED');
-  if (open.length) refuse(`layer(s) ${open.join(', ')} not closed`);
-  if (plan.owed.length) refuse(`acts still owed: ${plan.owed.join('; ')}`);
-  const live = jobFiles(R).map((p) => [p.slice(5, -3), parseJob(stateRead(R, p) || '')]).filter(([, j]) => j && j.state !== 'ARCHIVED');
-  if (live.length) refuse(`jobs not archived: ${live.map(([m, j]) => `${m} ${j.state}`).join('; ')}`);
-  const n = roundNumber(R, T), arch = `build/plan/archive/${T}-R${n}.md`;
-  R.write(arch, text);
-  // the next round's plan (issue 73, Civicsmith: `next.md` was the next tranche's list and the completion round had its own
-  // file): `--next <file>` names it; else the tranche's completion round, `build/plan/<T>-completion.md` (PLN 7); else
-  // `next.md` only when its title names this tranche. Any other `next.md` is the next tranche's and stays where it is.
-  const nextOf = (f) => { const t = R.read(f); return t === null ? null : { f, t }; };
-  const cand = o.next ? (nextOf(o.next) ?? refuse(`--next ${o.next}: no such file`)) : nextOf(`build/plan/${T}-completion.md`) ?? (() => { const c = nextOf('build/plan/next.md'); return c && c.t.match(/^# Plan: .*?\b([A-Z]+\d+[a-z]?)\s*$/m)?.[1] === T ? c : null; })();
-  const next = cand?.t ?? null, paths = [arch, PLAN];
-  if (cand && Buffer.byteLength(cand.t) > PLAN_LIMIT) refuse(`${cand.f} is ${Buffer.byteLength(cand.t)} bytes, over ${PLAN_LIMIT} (SESSIONS §6.3): split it into rounds`);
-  if (cand) { R.write(PLAN, cand.t); rmSync(join(R.dir, cand.f)); paths.push(cand.f); } else rmSync(join(R.dir, PLAN));
-  const commit = commitPush(R, TRANCHE, paths, `plan ${T}: round R${n} closes${next ? '; the next plan is current' : ''}`);
-  planEdit(R, (p) => ({ ...p, layers: {} }), `round R${n} closed`);
-  return { tranche: T, round: n, archived: arch, next: cand?.f ?? null, commit };
-}
-// A tranche opens from main's tip on the fixed branch `tranche` (JOB-LIFE §1), with its first round's plan. The branch
-// is never deleted (the ruleset refuses it; measured 29 Oct, #5): when it exists it is fast-forwarded to main, which holds
-// it whole once the close PR has merged; a tip not on main is a running tranche.
-export function trancheOpen(o) {
-  const R = repo(o.product), text = planFile(o), T = tranche({ read: () => text }).id;
-  const held = grantsHeld(R); if (held) refuse(held);   // PERMISSIONS §10.3: a missing grant stops the opening, never a step
-  R.fetch('main', TRANCHE);
-  const tip = R.g(['rev-parse', 'origin/main']);
-  if (R.heads(`refs/heads/${TRANCHE}`).length) { try { R.g(['merge-base', '--is-ancestor', `origin/${TRANCHE}`, tip]); } catch { refuse(`${TRANCHE} holds work not on main: the running tranche closes first (its close PR merged, recorded by \`proc tranche merged\`)`); } }
-  const closing = R.g(['ls-tree', '-r', '--name-only', 'origin/main', '--', R.rel('build/plan/archive')]).split('\n').filter(Boolean).filter((f) => /\*\*Status\*\* · CLOSING/.test(R.g(['show', `origin/main:${f}`])));
-  if (closing.length) refuse(`an archived plan still reads CLOSING on main: ${closing.join(', ')}`);
-  R.g(['push', '-q', 'origin', `${tip}:refs/heads/${TRANCHE}`]);   // a fast-forward, or the branch made
-  R.fetch(TRANCHE);
-  try { R.g(['checkout', '-q', '-B', TRANCHE, `origin/${TRANCHE}`]); } catch { refuse(`could not check out ${TRANCHE}: commit or stash the checkout first`); }
-  const r = roundOpen({ ...o, newTranche: true });
-  return { tranche: T, from: tip.slice(0, 7), ...r };
-}
-// A tranche already running when the product came under neoProcess (issue 69: Civicsmith's T53, on `tranche/T53`, paused by
-// Bob; onboarding's record says it resumes under the new process) is carried onto the fixed branch `tranche` once, by the
-// first BOB, before the first epoch: the branch is made from the running branch's tip, `main` is merged in (never a rebase,
-// P12) with `main`'s text winning every conflict (since the running tranche began, `main` changed only by the seed: the
-// onboarding record's rule), and the old plan is archived, so the work that remains opens as the tranche's next round
-// (`proc round open`, written from what remains, P19). The old process's sessions named in its record are listed: they are
-// not this process's, get no message, and are Bob's to archive if he wants (GOV 9).
-export function trancheCarry(o) {
-  if (!NAME.test(o.name || '') || !/^BOB /.test(o.name) || !SESSION.test(o.session || '')) refuse('--from <the branch the running tranche is on> --name "BOB #<n>" --session <your session id>');
-  const R = repo(o.product), from = o.from;
-  if (typeof from !== 'string' || !from || from === TRANCHE || from === 'main') refuse('--from <the branch the running tranche is on>');
-  if (epoch(R)) refuse(`epoch ${epoch(R)} is open: a tranche is carried only before the first epoch`);
-  if (R.heads(`refs/heads/${TRANCHE}`).length) refuse(`${TRANCHE} exists on the remote: nothing to carry (open the epoch on it)`);
-  if (R.g(['status', '--porcelain', '--untracked-files=no'])) refuse('the checkout has uncommitted changes: commit or drop them first');
-  // the BOB's role, before any epoch: the carry's own acts (the prune dispatches, a message to ROOT) need one; takeover re-records it
-  const me = readRole(R.root);
-  if (me && me.session !== o.session) refuse(`this checkout's role is recorded for ${me.name ?? me.role} (${me.session})`);
-  if (!me) writeRole(R, { role: 'bob', product: R.rel('.'), session: o.session, name: o.name });
-  // git cannot hold `tranche` beside `tranche/*` (a ref is a file or a directory, never both; measured in the fixture, 30 Oct):
-  // every `tranche/*` tip not on main is kept as `carried/<name>`, then the old names are pruned by the product's workflow,
-  // which checks each tip is on main or a carried branch; then the command, run again, makes `tranche`
-  const olds = R.heads('refs/heads/tranche/*'), keep = (h) => `carried/${h.slice('tranche/'.length)}`, kept = [];
-  if (olds.length) {
-    R.fetch('main', ...olds);
-    const pruned = [];
-    for (const h of olds) {
-      let onMain = false; try { R.g(['merge-base', '--is-ancestor', `origin/${h}`, 'origin/main']); onMain = true; } catch { /* not provably */ }
-      if (!onMain) { R.g(['push', '-q', 'origin', `origin/${h}:refs/heads/${keep(h)}`]); kept.push(keep(h)); }
-      pruned.push(pruneRef(R, h));
-    }
-    const owed = pruned.filter((x) => !x.deleted);
-    if (owed.length) return { phase: 'prune', kept, dispatches: owed.map((x) => x.dispatch), next: `make each dispatch above (the product's prune workflow deletes each old name after checking its tip is on main or on a carried branch); once every run has passed, run this command again, unchanged` };
-  }
-  const src = R.heads(`refs/heads/${from}`).length ? from : from.startsWith('tranche/') && R.heads(`refs/heads/${keep(from)}`).length ? keep(from) : refuse(`${from} is not on the product's remote (nor kept as ${from.startsWith('tranche/') ? keep(from) : 'a carried branch'})`);
-  R.fetch('main', src);
-  const tip = R.g(['rev-parse', `origin/${src}`]);
-  const base = () => { try { return R.g(['merge-base', `origin/${src}`, 'origin/main']); } catch { return null; } };
-  if (!base()) { try { R.g(['fetch', '-q', '--unshallow', 'origin', `+refs/heads/main:refs/remotes/origin/main`, `+refs/heads/${src}:refs/remotes/origin/${src}`]); } catch { /* not shallow */ } }
-  if (!base()) refuse(`${src} and main share no history: a carry merges main into the running tranche, so they must`);
-  const mainChanged = R.g(['diff', '--name-only', base(), 'origin/main']).split('\n').filter(Boolean);
-  R.g(['checkout', '-q', '-B', TRANCHE, `origin/${src}`]);
-  const m = spawnSync('git', ['-C', R.root, 'merge', '--no-ff', '--no-edit', '-m', `tranche carried from ${src}: main merged in, main's text wins every conflict`, 'origin/main'], { encoding: 'utf8' });
-  const conflicts = m.status === 0 ? [] : R.g(['diff', '--name-only', '--diff-filter=U']).split('\n').filter(Boolean);
-  for (const f of conflicts) {
-    let onMain = true; try { R.g(['cat-file', '-e', `origin/main:${f}`]); } catch { onMain = false; }
-    if (onMain) { R.g(['checkout', '--theirs', '--', f]); R.g(['add', '--', f]); } else R.g(['rm', '-q', '--', f]);
-  }
-  if (m.status !== 0) {
-    if (R.g(['diff', '--name-only', '--diff-filter=U'])) { spawnSync('git', ['-C', R.root, 'merge', '--abort']); refuse(`the merge of main could not be completed: ${(m.stderr || m.stdout || '').trim().split('\n').pop()}`); }
-    R.g(['commit', '-q', '--no-edit']);
-  }
-  const old = R.read(PLAN), paths = [];
-  let archived = null;
-  if (old) {
-    // an old process's title may lack the colon (`# Plan T53 · …`): its first tranche id is taken
-    const T = old.match(/^# Plan:? .*?\b([A-Z]+\d+[a-z]?)\b/m)?.[1] ?? refuse(`${PLAN} on ${src}: its title names no tranche id`);
-    archived = `build/plan/archive/${T}-R${roundNumber(R, T)}.md`;
-    R.write(archived, old); rmSync(join(R.dir, PLAN)); paths.push(archived, PLAN);
-  }
-  const record = [old, R.read('build/handoff.md')].filter(Boolean).join('\n');
-  const oldSessions = [...new Set([...record.matchAll(/\b([A-Z][A-Z0-9 -]*? #\d+)\b[^\n#]{0,12}?\b(session_[0-9A-Za-z]{10,})/g)].map((x) => `${x[1]} ${x[2]}`))];
-  const lastBob = Math.max(0, ...[...record.matchAll(/\bBOB #(\d+)/g)].map((x) => Number(x[1])));
-  const commit = paths.length ? commitPush(R, TRANCHE, paths, `tranche carried from ${src}: its plan archived; the work that remains opens as the next round`) : (R.g(['push', '-q', 'origin', `HEAD:refs/heads/${TRANCHE}`]), R.g(['rev-parse', '--short', 'HEAD']));
-  // the old names' local tracking refs block `origin/tranche` (issue 72: "cannot lock ref"): dropped, nothing on the remote
-  for (const ref of R.g(['for-each-ref', '--format=%(refname)', `refs/remotes/origin/${TRANCHE}/`]).split('\n').filter(Boolean)) R.g(['update-ref', '-d', ref]);
-  R.fetch(TRANCHE); R.g(['branch', '-q', '--set-upstream-to', `origin/${TRANCHE}`]);
-  return { phase: 'carried', tranche: TRANCHE, from: src, kept, tip: tip.slice(0, 7), commit, mainChanged: mainChanged.length, conflicts, archived, lastBob: lastBob || null, oldSessions,
-    next: `run \`proc epoch open\`, then \`proc takeover\`; then write the work that remains of ${archived ?? 'the carried tranche'} as the next round's plan, from what remains (P19), and open it with \`proc round open\` (a module's branch the old process left unmerged, \`job/<tranche>/<module>\`, is taken in by that module's job: its entry names \`proc job takein --branch <it> --sha <its tip>\`, JOB-LIFE §1a). The old process's sessions listed are not this process's: send them nothing; they are Bob's to archive if he wants (GOV 9)` };
-}
-// JOB-LIFE §1, §10; P12: every round closed, no ask open, nothing owed, every session archived; main merged in (never a
-// rebase); the checks and the artifacts once more; the plan CLOSING; the close PR printed and owed.
-export function trancheClose(o) {
-  const R = repo(o.product); on(R, TRANCHE);
-  const plan = parsePlan(stateRead(R, 'plan.md') || '');
-  if (R.read(PLAN)) refuse(`a round is open (${PLAN} exists): close it first`);
-  if (plan.owed.length) refuse(`acts still owed: ${plan.owed.join('; ')}`);
-  const open = asks(R).filter((a) => a.status !== 'CLOSED'); if (open.length) refuse(`asks still open: ${open.map((a) => a.id).join(', ')}`);
-  const live = [...jobFiles(R), ...stateList(R, 'lanes')].filter((p) => /· LIVE |· (STARTING|WORKING|WAITING|BLOCKED|NEEDS BOB|COMPLETE|REOPENED|MERGED)/.test(stateRead(R, p) || ''));
-  if (live.length) refuse(`sessions still live: ${live.join(', ')} (retire and archive them first)`);
-  if (unpushed(R).length) refuse(`the tranche checkout is not pushed: ${unpushed(R).join('; ')}`);
-  R.fetch('main'); history(R, 'origin/main', 'HEAD');
-  try { R.g(['merge', '-q', '--no-edit', 'origin/main']); } catch { spawnSync('git', ['-C', R.root, 'merge', '--abort']); refuse('merging main into the tranche conflicts: resolve it by hand on the tranche, then close again'); }
-  const art = regenerate(R);
-  if (art.stale.length) refuse(`artifacts stale after regenerating: ${art.stale.join(', ')}`);
-  if (art.changed.length) { R.g(['add', '--', ...art.changed.map(R.rel)]); R.g(['commit', '-q', '-m', `artifacts regenerated at the tranche's close: ${art.changed.join(', ')}`]); }
-  const found = allChecks(R);
-  if (found.fails.size) {
-    const start = history(R, 'origin/main', 'HEAD') ?? refuse('no common history with main');
-    const old = at(R, start, () => allChecks(R)).fails, added = [...found.fails].filter((x) => !old.has(x));
-    if (added.length) refuse(`checks: ${added.length} finding(s) new since the tranche opened: ${added.slice(0, 10).join('; ')}`);
-  }
-  const T = archivedTranche(R) ?? 'the tranche';
-  // The epoch ends with the tranche (PROTOCOL §7d): its closed line goes into the close PR, since nothing is pushed to
-  // the tranche once main holds it whole (§1); `epoch close` then only deletes the state branch.
-  const e = epoch(R), elog = R.read('build/epochs.md');
-  if (e && elog && new RegExp(`^- ${e} · opened \\S+$`, 'm').test(elog)) {
-    R.write('build/epochs.md', elog.replace(new RegExp(`^- ${e} · opened (\\S+)$`, 'm'), `- ${e} · opened $1 · closed ${today()} with ${T}`));
-    R.g(['add', '--', R.rel('build/epochs.md')]); R.g(['commit', '-q', '-m', `epoch ${e} closes with ${T}`]);
-  }
-  R.g(['push', '-q', 'origin', `HEAD:refs/heads/${TRANCHE}`]);
-  const commit = planEdit(R, (p) => ({ ...owe(p, [`merge ${TRANCHE}`]), state: 'CLOSING' }), `${T}: CLOSING`);
-  const tip = R.g(['rev-parse', 'HEAD']);
-  return { tranche: T, head: tip.slice(0, 7), commit, pr: { ...ghRepo(R), title: `${T}: close`, head: TRANCHE, base: 'main', body: `The tranche ${T} closes: every round archived under build/plan/archive/, every job merged and archived, the checks green over the whole product.`, draft: false }, merge: { tool: 'merge_pull_request', ...ghRepo(R), pullNumber: '<the PR\'s number>', merge_method: 'merge', expectedHeadSha: tip }, then: `create the PR, merge it by the printed call once it is mergeable (the hook passes it at CLOSING with expectedHeadSha the tranche's tip), then proc tranche merged --sha <merge commit>` };
-}
-// The close PR's merge recorded: the commit is on main and holds the tranche's tip; the plan CLOSED. The branch stays
-// (the ruleset refuses its deletion) and the next `tranche open` fast-forwards it.
-export function trancheMerged(o) {
-  const R = repo(o.product), sha = String(o.sha || ''); if (!/^[0-9a-f]{7,40}$/.test(sha)) refuse('--sha <merge commit>');
-  const plan = parsePlan(stateRead(R, 'plan.md') || '');
-  if (plan.state !== 'CLOSING') refuse(`the plan reads ${plan.state ?? 'nothing'}, not CLOSING: run proc tranche close first`);
-  R.fetch('main', TRANCHE);
-  let full; try { full = R.g(['rev-parse', '--verify', `${sha}^{commit}`]); } catch { refuse(`${sha}: not a commit this clone sees after fetching main`); }
-  try { R.g(['merge-base', '--is-ancestor', full, 'origin/main']); } catch { refuse(`${sha} is not on main`); }
-  let head = null; try { head = R.g(['rev-parse', `origin/${TRANCHE}`]); } catch { /* gone */ }
-  if (head) { try { R.g(['merge-base', '--is-ancestor', head, full]); } catch { refuse(`${TRANCHE}'s tip ${head.slice(0, 7)} is not in ${sha}`); } }
-  const commit = planEdit(R, (p) => ({ ...clear(p, `merge ${TRANCHE}`), state: 'CLOSED' }), `tranche merged ${full.slice(0, 7)}`);
-  return { commit, merged: full.slice(0, 7), then: 'proc epoch close (after the archives), then the next tranche opens from main (the branch is fast-forwarded)' };
-}
-// The tranche's footprint in history since its base (P14; lane PROCESS-REDESIGN R8): product commits against bookkeeping.
-export function footprint(o) {
-  const R = repo(o.product), ref = o.base || 'origin/main';
-  if (ref.startsWith('origin/')) R.fetch(ref.slice(7));
-  const base = history(R, ref, 'HEAD') ?? refuse(`${ref} shares no history with HEAD`);
-  const pre = R.rel('.') === '.' ? '' : `${R.rel('.')}/`;
-  const kinds = { product: 0, 'build state': 0, docs: 0 };
-  let merges = 0;
-  for (const block of R.g(['log', '--format=@@%P', '--name-only', `${base}..HEAD`]).split('@@').slice(1)) {
-    const [parents, ...files] = block.split('\n').map((l) => l.trim()).filter(Boolean);
-    if (parents.split(' ').length > 1) { merges++; continue; }
-    const rel = files.map((f) => (f.startsWith(pre) ? f.slice(pre.length) : `../${f}`));
-    if (!rel.length) continue;
-    kinds[rel.every((f) => f.startsWith('build/')) ? 'build state' : rel.every((f) => f.startsWith('build/') || f.startsWith('docs/')) ? 'docs' : 'product']++;
-  }
-  const commits = Object.values(kinds).reduce((a, b) => a + b, 0);
-  return { base: base.slice(0, 7), commits, merges, kinds, bookkeeping: commits ? `${Math.round((100 * (commits - kinds.product)) / commits)} %` : '0 %' };
-}
-
-// A ruling of BOB's or Bob's (rulebook GOV 7): one line `K<n> · date · area · ruling · why` in the product's log, committed with
-// the files it owes. A lane's decision is an `L-<ID>-<n>` line instead (DESIGN-STAGE §3).
-export function ruling(o) {
-  const R = repo(o.product); if (!o.text || !o.why) refuse('--text "<the ruling>" --why "<why>" [--module <m>] [--files <p1,p2>]');
-  on(R, TRANCHE);
-  const files = String(o.files || '').split(',').filter(Boolean);
-  for (const f of files) if (R.read(f) === null) refuse(`${f}: no such file`);
-  const log = 'build/rulings.md', cur = R.read(log) ?? '# Rulings\n';
-  const k = Math.max(0, ...[...cur.matchAll(/^- K(\d+) · /gm)].map((x) => Number(x[1]))) + 1;
-  const one = (s) => String(s).replace(/\s*\n\s*/g, ' ').trim();
-  R.write(log, `${cur.trimEnd()}\n- K${k} · ${today()} · ${o.module || 'process'} · ${one(o.text)} · ${one(o.why)}\n`);
-  return { ruling: `K${k}`, commit: commitPush(R, TRANCHE, [log, ...files], `K${k}: ${one(o.text).slice(0, 60)}`) };
-}
+// what the tranche's close needs from modules after planning, given by the dispatcher (K29: the open asks, the artifacts)
+export const PLANNING_DEPS = { asks: (R) => asks(R).filter((a) => a.status !== 'CLOSED').map((a) => a.id), regenerate };
+export const trancheClose = (o) => planTrancheClose(o, PLANNING_DEPS);
 
 // PERMISSIONS §9: a development repository and its two rulesets (SETUP-STEPS), made by this command with the process's
 // own GitHub token. Measured 29 Oct (#8): from a cloud session no token can do it: the agent proxy binds every GitHub
@@ -2020,6 +1804,7 @@ export const COMMANDS = {
   'job reopen': jobReopen, 'job retire': jobRetire, 'close merge': closeMerge, 'job archived': jobArchived, defect, 'bob archived': bobArchived, 'bob release': bobRelease,
   reading, gate: gateCmd, shims,
   'tranche open': trancheOpen, 'tranche carry': trancheCarry, 'round open': roundOpen, 'round close': roundClose, 'tranche close': trancheClose, 'tranche merged': trancheMerged, footprint,
+  'tranche report': report, stop, resume, place,
   ruling, steps: stepsCmd, refused, 'refused routed': refusedRouted, 'repo setup': repoSetup, 'repo rename': repoRename, 'repo transfer': repoTransfer, 'repo shims': repoShims, 'root start': rootStart, 'root bob': rootBob, 'process start': processStart, 'process handoff': processHandoff, 'process status': processStatus, 'process archived': processArchived, say, issue: issueFile, 'issue ack': issueAck, 'issue close': issueClose, 'issue reply': issueReply, 'issue seen': issueSeen, 'grants check': grantsCheck, init, 'onboard start': onboardStart,
 };
 async function main() {
