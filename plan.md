@@ -1,6 +1,6 @@
 # Plan (transient)
 
 **Status** · OPEN · BOB #3 · session_012hdw2SQeMD3yMLUC1NiuQu
-**Owed** · none
-**Layers** · 1 CLOSED; 2 CLOSED
+**Owed** · open PR planning; start planning; open PR jobs; start jobs; open PR gate; start gate; open PR integration; start integration
+**Layers** · 1 CLOSED; 2 CLOSED; 3 STARTED
 **Retiring** · BOB #2 session_01RAN5eo3fxXxLGJQ2rN1rFR released
